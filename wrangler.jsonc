@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sport-bowling",
+  "main": "worker.js",
+  "compatibility_date": "2026-08-03",
+  "routes": [
+    { "pattern": "sport-bowling.fantomzone.app", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "BowlingRoom" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["BowlingRoom"] }
+  ],
+  "observability": { "enabled": true }
+}

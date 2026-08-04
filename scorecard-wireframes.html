@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sport Bowling — Scorecard Wireframes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --black:#0B0B0F; --silver:#C7CDD3; --gold:#D4AF37;
+  --blue:#1B6CF2; --red:#D7263D; --green:#17B978;
+  --yellow:#FFD23F; --orange:#FF7A1A; --purple:#8B44C7; --pink:#FF5FA2;
+  --lane:#15151C; --line:#2A2A35; --dim:#6D7280;
+  --display:"Barlow Condensed",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--black);color:var(--silver);
+  font-family:var(--display);
+  background-image:repeating-linear-gradient(90deg,rgba(255,255,255,.014) 0 1px,transparent 1px 34px);
+}
+.wrap{max-width:1240px;margin:0 auto;padding:48px 24px 96px}
+
+header{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:14px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.22em;color:var(--dim);text-transform:uppercase}
+h1{font-size:clamp(34px,6vw,60px);font-weight:700;letter-spacing:-.01em;line-height:.95;
+   margin:10px 0 8px;color:#fff;text-transform:uppercase}
+h1 em{font-style:normal;color:var(--gold)}
+.sub{max-width:60ch;font-size:17px;line-height:1.5;color:var(--dim)}
+
+.legend{display:flex;flex-wrap:wrap;gap:18px;margin:26px 0 44px;font-family:var(--mono);font-size:11px;letter-spacing:.06em}
+.legend span{display:flex;align-items:center;gap:7px;color:var(--dim)}
+.sw{width:11px;height:11px;border-radius:2px}
+
+.grid{display:grid;grid-template-columns:340px 1fr;gap:44px;align-items:start}
+@media(max-width:900px){.grid{grid-template-columns:1fr;gap:36px}}
+
+.label{font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;
+       color:var(--gold);margin-bottom:12px;display:flex;justify-content:space-between}
+.label b{color:var(--dim);font-weight:400}
+
+/* ---------- device shells ---------- */
+.device{background:var(--lane);border:1px solid var(--line);border-radius:20px;padding:10px;
+        box-shadow:0 30px 70px -30px #000}
+.screen{background:var(--black);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.portrait .screen{height:660px}
+.landscape .screen{height:404px}
+
+/* ---------- shared bits ---------- */
+.bar{display:flex;align-items:center;gap:8px;padding:9px 11px;border-bottom:1px solid var(--line)}
+.code{font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--purple)}
+.chip{font-family:var(--mono);font-size:9px;letter-spacing:.1em;padding:2px 6px;border-radius:3px;
+      border:1px solid var(--line);color:var(--dim);text-transform:uppercase}
+.chip.live{color:var(--green);border-color:rgba(23,185,120,.4)}
+
+/* team totals strip — the portrait signature */
+.totals{display:flex;align-items:stretch;border-bottom:1px solid var(--line)}
+.tt{flex:1;padding:11px 13px;position:relative}
+.tt+.tt{border-left:1px solid var(--line)}
+.tt .nm{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase}
+.tt .val{font-family:var(--mono);font-size:31px;font-weight:700;line-height:1.05;color:#fff;margin-top:2px}
+.tt.lead .val{color:var(--gold)}
+.tt.lead::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--gold)}
+.tt.a .nm{color:var(--blue)} .tt.b .nm{color:var(--red)}
+.tt .hcp{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:3px}
+
+/* current bowler frame boxes — real scorecard vernacular */
+.now{padding:11px 13px;border-bottom:1px solid var(--line)}
+.nowhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.who{font-size:17px;font-weight:600;color:#fff;letter-spacing:.02em}
+.who i{font-style:normal;font-family:var(--mono);font-size:9px;letter-spacing:.12em;
+       color:var(--black);background:var(--blue);padding:2px 5px;border-radius:2px;margin-left:7px;vertical-align:2px}
+.frameno{font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:.1em}
+
+.frames{display:flex;gap:3px}
+.fr{flex:1;border:1px solid var(--line);border-radius:2px;overflow:hidden;min-width:0}
+.fr .balls{display:flex;height:17px}
+.fr .b{flex:1;font-family:var(--mono);font-size:10px;display:flex;align-items:center;justify-content:center;color:var(--silver)}
+.fr .b+.b{border-left:1px solid var(--line);background:rgba(255,255,255,.03)}
+.fr .cum{font-family:var(--mono);font-size:12px;font-weight:700;text-align:center;padding:2px 0;
+         border-top:1px solid var(--line);color:#fff}
+.fr.tenth{flex:1.5}
+.fr.active{border-color:var(--gold);box-shadow:0 0 0 1px rgba(212,175,55,.35)}
+.fr.active .cum{color:var(--gold)}
+.fr .b.x{color:var(--green);font-weight:700}
+.fr .b.sp{color:var(--yellow);font-weight:700}
+.fr .b.foul{color:var(--red);font-weight:700}
+.fr .cum.pending{color:var(--dim)}
+
+/* lane viewport */
+.lane{flex:1;position:relative;display:flex;align-items:flex-end;justify-content:center;
+      background:
+        radial-gradient(120% 70% at 50% 100%,rgba(255,122,26,.13),transparent 62%),
+        linear-gradient(#0E0E15,#08080C);
+      border-bottom:1px solid var(--line);overflow:hidden}
+.lane::before{content:"";position:absolute;inset:0;
+  background:repeating-linear-gradient(90deg,transparent 0 15px,rgba(199,205,211,.05) 15px 16px);
+  mask-image:linear-gradient(transparent,#000 55%)}
+.rack{position:absolute;top:16%;display:grid;gap:5px;justify-items:center}
+.rack .row{display:flex;gap:8px}
+.pin{width:7px;height:16px;border-radius:3px 3px 2px 2px;background:linear-gradient(#fff,#B9BFC6)}
+.pin.down{background:#23232C}
+.pin::after{content:"";display:block;margin:5px auto 0;width:7px;height:2px;background:var(--red);opacity:.85}
+.pin.down::after{opacity:.15}
+.ballmark{position:absolute;bottom:16%;width:26px;height:26px;border-radius:50%;
+  background:radial-gradient(circle at 34% 30%,#5C9BFF,var(--blue) 60%,#0B3E9E);
+  box-shadow:0 0 22px 6px rgba(255,122,26,.5),0 0 46px 16px rgba(255,122,26,.2)}
+.ballmark::after{content:"";position:absolute;left:50%;bottom:-46px;transform:translateX(-50%);
+  width:12px;height:52px;border-radius:6px;
+  background:linear-gradient(transparent,rgba(255,122,26,.55),rgba(255,210,63,.75));filter:blur(3px)}
+.tag{position:absolute;top:9px;left:11px;font-family:var(--mono);font-size:9px;letter-spacing:.12em;color:var(--dim)}
+.tag.r{left:auto;right:11px;color:var(--orange)}
+
+/* controls */
+.ctrl{padding:11px 13px;display:flex;gap:9px;align-items:center}
+.aimbtn{flex:1;height:38px;border-radius:8px;border:1px dashed var(--line);
+        display:flex;align-items:center;justify-content:center;font-family:var(--mono);
+        font-size:10px;letter-spacing:.14em;color:var(--dim);text-transform:uppercase}
+.aimbtn.pre{border-style:solid;border-color:rgba(23,185,120,.45);color:var(--green)}
+.meter{width:13px;height:38px;border-radius:7px;background:linear-gradient(#0E0E15,#1A1A22);
+       border:1px solid var(--line);position:relative;overflow:hidden}
+.meter i{position:absolute;left:0;right:0;bottom:0;height:58%;background:linear-gradient(var(--orange),var(--yellow))}
+
+/* landscape rails */
+.lsplit{display:flex;flex:1;min-height:0}
+.rail{width:184px;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.teamhdr{padding:6px 10px;font-family:var(--mono);font-size:9px;letter-spacing:.16em;
+         text-transform:uppercase;display:flex;justify-content:space-between;border-bottom:1px solid var(--line)}
+.teamhdr.a{color:var(--blue);background:rgba(27,108,242,.09)}
+.teamhdr.b{color:var(--red);background:rgba(215,38,61,.09)}
+.teamhdr b{font-family:var(--mono);color:#fff}
+.teamhdr.lead b{color:var(--gold)}
+.pl{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;font-size:14px;
+    border-bottom:1px solid rgba(42,42,53,.55)}
+.pl .n{display:flex;align-items:center;gap:6px;color:var(--silver)}
+.dot{width:8px;height:8px;border-radius:50%}
+.pl .s{font-family:var(--mono);font-size:13px;color:#fff}
+.pl.cur{background:rgba(212,175,55,.11)}
+.pl.cur .n{color:#fff}
+.pl.ai .n{color:var(--dim)}
+.pl.ai .n::after{content:"AI";font-family:var(--mono);font-size:8px;letter-spacing:.1em;
+  border:1px solid var(--line);padding:1px 3px;border-radius:2px;color:var(--dim)}
+.lmain{flex:1;display:flex;flex-direction:column;min-width:0}
+
+/* annotations */
+.notes{margin-top:16px;border-top:1px solid var(--line);padding-top:14px}
+.note{display:flex;gap:11px;padding:7px 0;font-size:15px;line-height:1.45;color:var(--dim)}
+.note b{font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--gold);
+        flex:0 0 22px;padding-top:3px}
+.note strong{color:var(--silver);font-weight:600}
+footer{margin-top:60px;border-top:1px solid var(--line);padding-top:18px;
+  font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.08em}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Sport Bowling · Wireframe 01 · Team scorecard</div>
+  <h1>Two orientations,<br>one <em>scorecard</em></h1>
+  <p class="sub">Team play forced the layout problem: eight players, ten frames, and a phone held upright. These are the two answers — same data, different information hierarchy. Shown mid-match, 2v2, frame 6.</p>
+</header>
+
+<div class="legend">
+  <span><i class="sw" style="background:var(--blue)"></i>Team A</span>
+  <span><i class="sw" style="background:var(--red)"></i>Team B</span>
+  <span><i class="sw" style="background:var(--gold)"></i>Leading / active</span>
+  <span><i class="sw" style="background:var(--green)"></i>Strike · ready</span>
+  <span><i class="sw" style="background:var(--yellow)"></i>Spare</span>
+  <span><i class="sw" style="background:var(--orange)"></i>Fire / power</span>
+</div>
+
+<div class="grid">
+
+  <!-- ================= PORTRAIT ================= -->
+  <section>
+    <div class="label"><span>Portrait</span><b>one-handed</b></div>
+    <div class="device portrait">
+      <div class="screen">
+
+        <div class="bar">
+          <span class="code">ROOM K7P2QX</span>
+          <span class="chip live">● LIVE</span>
+          <span class="chip" style="margin-left:auto">HCP ON</span>
+        </div>
+
+        <div class="totals">
+          <div class="tt a lead">
+            <div class="nm">Team A</div>
+            <div class="val">412</div>
+            <div class="hcp">scratch 389 · +23</div>
+          </div>
+          <div class="tt b">
+            <div class="nm">Team B</div>
+            <div class="val">397</div>
+            <div class="hcp">scratch 397 · +0</div>
+          </div>
+        </div>
+
+        <div class="now">
+          <div class="nowhead">
+            <span class="who">Marco<i>YOU</i></span>
+            <span class="frameno">FRAME 6 · BALL 1</span>
+          </div>
+          <div class="frames">
+            <div class="fr"><div class="balls"><div class="b x">X</div><div class="b"></div></div><div class="cum">28</div></div>
+            <div class="fr"><div class="balls"><div class="b">7</div><div class="b sp">/</div></div><div class="cum">48</div></div>
+            <div class="fr"><div class="balls"><div class="b x">X</div><div class="b"></div></div><div class="cum">67</div></div>
+            <div class="fr"><div class="balls"><div class="b">6</div><div class="b">3</div></div><div class="cum">76</div></div>
+            <div class="fr"><div class="balls"><div class="b foul">F</div><div class="b">8</div></div><div class="cum">84</div></div>
+            <div class="fr active"><div class="balls"><div class="b">–</div><div class="b"></div></div><div class="cum pending">—</div></div>
+          </div>
+        </div>
+
+        <div class="lane">
+          <span class="tag">CHAMELEON 39FT</span>
+          <span class="tag r">STREAK ×1</span>
+          <div class="rack">
+            <div class="row"><i class="pin"></i><i class="pin"></i><i class="pin"></i><i class="pin"></i></div>
+            <div class="row"><i class="pin"></i><i class="pin"></i><i class="pin"></i></div>
+            <div class="row"><i class="pin"></i><i class="pin"></i></div>
+            <div class="row"><i class="pin"></i></div>
+          </div>
+          <div class="ballmark"></div>
+        </div>
+
+        <div class="ctrl">
+          <div class="aimbtn">Drag to aim · swipe to roll</div>
+          <div class="meter"><i></i></div>
+          <div class="meter"><i style="height:34%;background:linear-gradient(var(--purple),var(--pink))"></i></div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="note"><b>01</b><span><strong>Team totals sit above everything.</strong> In a team game the number that matters is the team's, not yours. Leader carries the Gold underline.</span></div>
+      <div class="note"><b>02</b><span><strong>Only the current bowler's frames are shown.</strong> Tap the strip to expand into the full overlay: teams stacked, players nested. One tap to any player's history — never two.</span></div>
+      <div class="note"><b>03</b><span><strong>Handicap is never hidden.</strong> Scratch score sits under the adjusted one, so nobody is confused about what they actually bowled.</span></div>
+      <div class="note"><b>04</b><span><strong>Controls stay in the bottom third</strong> — thumb-reachable, one-handed. The lane viewport absorbs the leftover height.</span></div>
+    </div>
+  </section>
+
+  <!-- ================= LANDSCAPE ================= -->
+  <section>
+    <div class="label"><span>Landscape</span><b>PC · tablet · spectating</b></div>
+    <div class="device landscape">
+      <div class="screen">
+
+        <div class="bar">
+          <span class="code">ROOM K7P2QX</span>
+          <span class="chip live">● LIVE</span>
+          <span class="chip">2 V 2</span>
+          <span class="chip">CHAMELEON 39FT</span>
+          <span class="chip" style="margin-left:auto">EST. 14 MIN LEFT</span>
+        </div>
+
+        <div class="lsplit">
+          <aside class="rail">
+            <div class="teamhdr a lead">Team A <b>412</b></div>
+            <div class="pl cur"><span class="n"><i class="dot" style="background:var(--blue)"></i>Marco</span><span class="s">84</span></div>
+            <div class="pl"><span class="n"><i class="dot" style="background:var(--green)"></i>Priya</span><span class="s">328</span></div>
+            <div class="teamhdr b">Team B <b>397</b></div>
+            <div class="pl"><span class="n"><i class="dot" style="background:var(--gold)"></i>Dee</span><span class="s">211</span></div>
+            <div class="pl ai"><span class="n"><i class="dot" style="background:var(--silver)"></i>Sam</span><span class="s">186</span></div>
+          </aside>
+
+          <div class="lmain">
+            <div class="now" style="border-bottom:1px solid var(--line)">
+              <div class="nowhead">
+                <span class="who">Marco<i>YOU</i></span>
+                <span class="frameno">FRAME 6 · BALL 1 · 0:22</span>
+              </div>
+              <div class="frames">
+                <div class="fr"><div class="balls"><div class="b x">X</div><div class="b"></div></div><div class="cum">28</div></div>
+                <div class="fr"><div class="balls"><div class="b">7</div><div class="b sp">/</div></div><div class="cum">48</div></div>
+                <div class="fr"><div class="balls"><div class="b x">X</div><div class="b"></div></div><div class="cum">67</div></div>
+                <div class="fr"><div class="balls"><div class="b">6</div><div class="b">3</div></div><div class="cum">76</div></div>
+                <div class="fr"><div class="balls"><div class="b foul">F</div><div class="b">8</div></div><div class="cum">84</div></div>
+                <div class="fr active"><div class="balls"><div class="b">–</div><div class="b"></div></div><div class="cum pending">—</div></div>
+                <div class="fr"><div class="balls"><div class="b"></div><div class="b"></div></div><div class="cum pending">—</div></div>
+                <div class="fr"><div class="balls"><div class="b"></div><div class="b"></div></div><div class="cum pending">—</div></div>
+                <div class="fr"><div class="balls"><div class="b"></div><div class="b"></div></div><div class="cum pending">—</div></div>
+                <div class="fr tenth"><div class="balls"><div class="b"></div><div class="b"></div><div class="b"></div></div><div class="cum pending">—</div></div>
+              </div>
+            </div>
+
+            <div class="lane">
+              <span class="tag">OIL VIEW OFF</span>
+              <span class="tag r">STREAK ×1</span>
+              <div class="rack" style="top:12%">
+                <div class="row"><i class="pin"></i><i class="pin"></i><i class="pin"></i><i class="pin"></i></div>
+                <div class="row"><i class="pin"></i><i class="pin"></i><i class="pin"></i></div>
+                <div class="row"><i class="pin"></i><i class="pin"></i></div>
+                <div class="row"><i class="pin"></i></div>
+              </div>
+              <div class="ballmark"></div>
+            </div>
+
+            <div class="ctrl">
+              <div class="aimbtn">Position · A / D</div>
+              <div class="aimbtn pre">Pre-aim queued for Priya</div>
+              <div class="meter"><i></i></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="note"><b>05</b><span><strong>The full ten-frame strip is always visible</strong> — the thing portrait has to trade away. The 10th frame gets 1.5× width for its third ball.</span></div>
+      <div class="note"><b>06</b><span><strong>The left rail is the team structure.</strong> Players nest under team headers with live totals; the current bowler is highlighted in Gold and AI-substituted players carry a permanent marker.</span></div>
+      <div class="note"><b>07</b><span><strong>Pre-aim gets its own control slot.</strong> When it's not your turn the button becomes the queue state, so waiting has something to do — the main fix for 6–8 player rooms.</span></div>
+      <div class="note"><b>08</b><span><strong>Estimated time remaining is persistent.</strong> Players tolerate a long match; they don't tolerate not knowing how long it is.</span></div>
+    </div>
+  </section>
+
+</div>
+
+<footer>Wireframes — layout and hierarchy only. Colors are from the PRD's ten-color system; type, spacing, and pin art are not final.</footer>
+</div>
+</body>
+</html>

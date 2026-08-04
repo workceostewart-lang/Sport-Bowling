@@ -1,0 +1,23 @@
+# Sport Bowling agent brief
+
+Use `PRD-Sport-Bowling.md` as the product source of truth and `MVP-Scope.md` as the build-order guardrail.
+
+## Non-negotiables
+
+- Preserve a fully visible lane, ball, pins, score strip, and controls at every supported viewport.
+- Treat portrait and landscape as distinct responsive arrangements backed by one state model.
+- Use a fixed physics timestep. Never couple simulation results to render framerate.
+- Keep How to Play at the top level of the menu and reachable from gameplay.
+- Keep the path from launch to first roll to two taps or fewer.
+- Make Family Bowl the welcoming default: pass-and-play turns, optional smart bumpers, gentle-roll assistance, and encouraging language.
+- Keep the core action to aim and roll; advanced spin may enrich a roll but must never be required to have fun.
+- Avoid punitive failure states, complicated setup, and long waits between family turns.
+- Never encode state in color alone; pair color with labels, symbols, or shape.
+- Keep mobile controls inside safe areas and the lower third of portrait play.
+- The phone controller must always offer touch-swing fallback when motion permission or sensors are unavailable.
+- Run `npm test` and `npm run build` before committing or deploying.
+- Verify desktop, portrait mobile, compact mobile, and phone-controller views before release.
+
+## Product palette
+
+Gold `#D4AF37`, Red `#D7263D`, Black `#0B0B0F`, Blue `#1B6CF2`, Green `#17B978`, Yellow `#FFD23F`, Purple `#8B44C7`, Silver `#C7CDD3`, Orange `#FF7A1A`, Pink `#FF5FA2`.
