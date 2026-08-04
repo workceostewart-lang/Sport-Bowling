@@ -1,6 +1,6 @@
 # Sport Bowling agent brief
 
-Use `PRD-Sport-Bowling.md` as the rules/product baseline and `MVP-Scope.md` as the build-order guardrail. `Art-Direction-and-Mechanics.md` version 2.0 overrides both documents for camera, rendering, controls, hook physics, oil-pattern scope, and Family Mode latency.
+Use `PRD-Sport-Bowling.md` as the rules/product baseline and `MVP-Scope.md` as the build-order guardrail. `Art-Direction-and-Mechanics.md` version 2.1 overrides both documents for camera, rendering, controls, control modes, hook physics, oil-pattern scope, and Family Mode latency.
 
 ## Non-negotiables
 
@@ -8,10 +8,15 @@ Use `PRD-Sport-Bowling.md` as the rules/product baseline and `MVP-Scope.md` as t
 - Treat portrait and landscape as distinct responsive arrangements backed by one state model.
 - Use a fixed physics timestep. Never couple simulation results to render framerate.
 - Keep How to Play at the top level of the menu and reachable from gameplay.
-- Keep the path from launch to first roll to two taps or fewer.
-- Make Family Bowl the welcoming default: pass-and-play turns, optional smart bumpers, gentle-roll assistance, and encouraging language.
+- Keep the path from launch to the first physical delivery short, without adding a tap-to-throw shortcut.
+- Keep Solo, TV Mode, and Family Mode distinct and labelled at the main menu.
 - Keep the core action to aim and roll; advanced spin may enrich a roll but must never be required to have fun.
 - Never display a power meter, spin slider, or timing gauge. Position, angle, swing speed, and release rotation are the complete control model.
+- Never add a roll button, tap-to-throw, Space-key throw, auto-throw for a player, delivery assist, trajectory assist, smart bumper, or minimum-power boost.
+- Touch swipes must preserve their real speed, direction, and curvature; sloppy input must remain sloppy.
+- Motion Controls are optional only in Solo and vs CPU on a phone and must be exposed as `Motion Controls: On / Off` in setup and between frames.
+- TV Mode is solo motion play on a big screen. Family Mode is 2–4 player motion play with Shared or per-player phone assignments.
+- TV Mode and Family Mode require both an accelerometer and gyroscope. Refuse pairing when either sensor is unavailable.
 - Use bright flat fills in the 3D scene: no gradients, reflections, texture maps, specular materials, dark pin pit, bloom, or volumetrics.
 - Keep the camera fixed while aiming. During a roll, use only the specified slight push-in, pin-impact cut, and return.
 - Treat lane friction as one tunable constant and gutters as physical geometry.
@@ -19,7 +24,7 @@ Use `PRD-Sport-Bowling.md` as the rules/product baseline and `MVP-Scope.md` as t
 - Avoid punitive failure states, complicated setup, and long waits between family turns.
 - Never encode state in color alone; pair color with labels, symbols, or shape.
 - Keep mobile controls inside safe areas and the lower third of portrait play.
-- The phone controller must always offer touch-swing fallback when motion permission or sensors are unavailable.
+- TV Mode and Family Mode phone controllers must never offer touch or swipe fallback.
 - The phone controller must not require a player to look at it during a swing and must haptically acknowledge release and pin contact when supported.
 - Run `npm test` and `npm run build` before committing or deploying.
 - Verify desktop, portrait mobile, compact mobile, and phone-controller views before release.

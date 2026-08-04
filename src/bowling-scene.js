@@ -35,8 +35,6 @@ export class BowlingScene {
     this.lastTime = performance.now();
     this.startBoard = 20;
     this.aimBoard = 20;
-    this.bumpersEnabled = false;
-    this.bumperMeshes = [];
     this.impactCameraTriggered = false;
     this.cameraCutUntil = 0;
     this.baseCameraPosition = new THREE.Vector3();
@@ -130,15 +128,6 @@ export class BowlingScene {
       railBody.position.set(side * (LANE_WIDTH / 2 + 0.28), 0.05, -8.9);
       this.world.addBody(railBody);
 
-      const bumper = new THREE.Mesh(
-        new THREE.BoxGeometry(0.035, 0.07, 18.4),
-        new THREE.MeshBasicMaterial({ color: 0x17b978 }),
-      );
-      bumper.position.set(side * (LANE_WIDTH / 2 - 0.012), 0.045, -9.05);
-      bumper.visible = false;
-      this.bumpersEnabled = false;
-      this.bumperMeshes.push(bumper);
-      this.scene.add(bumper);
     }
 
     const backWall = new THREE.Mesh(
@@ -382,7 +371,7 @@ export class BowlingScene {
     this.setAim(angle);
     const startX = this.boardToX(this.startBoard);
     const targetX = this.boardToX(this.aimBoard);
-    const velocity = 9.5 + Math.max(0.15, Math.min(1, speed)) * 11.5;
+    const velocity = Math.max(0, Math.min(1, speed)) * 17.5;
     const line = Math.max(-0.9, Math.min(0.9, (targetX - startX) * 0.8));
     this.ballBody.wakeUp();
     this.ballBody.velocity.set(line, 0, -velocity);
@@ -487,11 +476,6 @@ export class BowlingScene {
     for (const ribbon of this.trailRibbons) ribbon.visible = !reduced && this.rolling;
   }
 
-  setFamilyMode(enabled) {
-    this.bumpersEnabled = Boolean(enabled);
-    for (const bumper of this.bumperMeshes) bumper.visible = this.bumpersEnabled;
-  }
-
   animate(time) {
     requestAnimationFrame(this.animate);
     if (!this.container || !this.container.isConnected) return;
@@ -501,17 +485,6 @@ export class BowlingScene {
     if (!this.paused) {
       this.accumulator += delta;
       while (this.accumulator >= FIXED_STEP) {
-        if (
-          this.rolling &&
-          this.bumpersEnabled &&
-          this.ballBody.position.z < -0.05 &&
-          this.ballBody.position.z > -18.45 &&
-          Math.abs(this.ballBody.position.x) > LANE_WIDTH / 2 - BALL_RADIUS * 0.72
-        ) {
-          const side = Math.sign(this.ballBody.position.x) || 1;
-          this.ballBody.position.x = side * (LANE_WIDTH / 2 - BALL_RADIUS * 0.76);
-          this.ballBody.velocity.x = -side * Math.max(0.45, Math.abs(this.ballBody.velocity.x) * 0.42);
-        }
         if (this.rolling && this.ballBody.position.z < -3 && this.ballBody.position.z > -18.4) {
           const traction = THREE.MathUtils.clamp((-this.ballBody.position.z - 3) / 15.4, 0.12, 1);
           const lateralRollSpeed = -this.ballBody.angularVelocity.z * BALL_RADIUS;

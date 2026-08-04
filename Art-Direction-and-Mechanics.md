@@ -1,7 +1,7 @@
 # SPORT BOWLING — Art Direction, Mechanics & Control Model
 
-**Version:** 2.0
-**Date:** August 3, 2026
+**Version:** 2.1
+**Date:** August 4, 2026
 **Supersedes:** Art-Direction-and-Physics v1.0 (the top-down 2D model)
 **References:** flat bright bowling screenshot (palette and rendering), Wii Sports Bowling (camera, mechanics, control feel)
 
@@ -83,6 +83,8 @@ The single biggest note from the client: **Wii Sports is too dark.** Its alley i
 
 **No meters. None.** No power bar to fill, no spin slider to drag, no timing gauge. This was explicit, and it's also what makes the Wii Sports control model feel good: the input *is* the motion, not a proxy for it.
 
+**No roll button and no tap-to-throw.** A tap has no delivery variance, so it is not a bowling input. There is no click, tap, Space-key, auto-throw, assist, or minimum-power path for a player. Touch input must preserve swipe speed, direction, and curvature so that an imprecise swipe creates an imprecise ball.
+
 ### 5.1 The three stages
 
 Identical in every mode. Only the input device changes.
@@ -91,41 +93,49 @@ Identical in every mode. Only the input device changes.
 |---|---|---|
 | **1. Position** | Step left or right along the approach | Starting position across the lane |
 | **2. Angle** | Turn the bowler to face a line | Direction of the throw |
-| **3. Throw** | Hold, swing, release | Power from swing speed; hook from wrist rotation at release |
+| **3. Delivery** | Swipe, or hold/swing/release when motion is enabled | Speed, direction, and hook from the physical input |
 
 Power comes from **how fast you swing**, not how long you hold something. Hook comes from **how much you rotate at the moment of release**, not from a spin selector. Both are continuous, both are physical, neither has a UI element.
 
-### 5.2 Family Mode — phone as motion controller
+### 5.2 TV Mode — solo motion on a big screen
+
+A computer connected to a TV runs the game and displays a room code. The solo player enters that code on a phone. The phone verifies its accelerometer and gyroscope, then becomes a full-screen hold area while the TV remains the display. The room code and signaling path are the same ones used by online rooms; this is not a separate pairing system.
+
+TV Mode is motion-only. Missing gyroscope data refuses the pairing with a clear explanation. There is no touch fallback.
+
+### 5.3 Family Mode — mandatory phone motion
 
 The shared-screen mode. Game runs on PC or TV; each player's phone becomes their controller.
 
 **Setup**
 1. Host starts Family Mode on the big screen. A room code appears.
-2. Each player opens the app on their phone and enters the code — the same code mechanic as online rooms.
-3. The phone switches to controller view: a large hold area, minimal text, no game rendering.
+2. Players open the game on one or more phones and enter the code — the same code mechanic as online rooms.
+3. Each phone verifies its accelerometer and gyroscope before it appears in the lobby.
+4. A verified phone switches to a full-screen hold area with no game rendering or touch throw.
+5. The host assigns phones to players or marks one phone Shared for pass-and-play. Assignments can change between frames.
 
 **Controlling**
-- **Position and angle:** drag or tilt to step and turn. Shown on the big screen, not the phone.
+- **Position and angle:** set on the big screen and sent to the phone as part of the same four-value physics input.
 - **Throw:** press and hold the phone's screen with your thumb (this is the "B button"), swing the phone forward in a real bowling motion, release your thumb at the bottom of the swing.
 - **Hook:** rotate your wrist as you release. Rotating clockwise curves right, anticlockwise curves left. Amount of rotation sets amount of hook.
 - **Feedback:** haptic pulse on release, second pulse on pin contact.
 
 **Requirements**
 - Reads accelerometer **and** gyroscope. Gyroscope is what makes hook work — without it, rotation can't be measured.
-- **Fallback for phones without a usable gyroscope:** swipe-and-flick on the phone screen, with the flick's curve setting hook. Same three stages, degraded fidelity, no meters.
+- **No fallback for phones without a usable gyroscope.** Pairing is refused because hook cannot be measured honestly.
 - **Latency budget: under 80 ms** from release to the ball leaving the bowler's hand on the big screen. Above roughly 100 ms the swing stops feeling connected to the result — this is the make-or-break number for the mode.
 - Local network only for the controller link. No round trip to a server for input.
 - Phone screen must never require the player to look at it mid-swing. Everything they need is on the big screen.
 
-### 5.3 Solo and vs. CPU — same mechanics, phone as both screen and controller
+### 5.4 Solo and vs. CPU — optional motion on one phone
 
 The mechanics are identical. The input adapts to one device:
 
-- **Motion (default on mobile):** hold the screen, swing the phone, release. Exactly the Family Mode motion, with the game rendered on the same device — the player looks at the screen before and after the swing, not during.
-- **Touch (always available):** hold, swipe forward to throw, curve the swipe to hook. Swipe speed is power; swipe curvature is spin. Still no meters.
-- **PC:** hold mouse button, drag back, flick forward, curve the flick. Or keyboard, per PRD 6.2.
+- **Motion (optional):** a labelled `Motion Controls: On / Off` button appears only when the phone exposes a usable gyroscope. It remains switchable between frames. Hold the lane, swing the phone, and release.
+- **Touch:** pull back and swipe forward. Swipe speed sets ball speed, the overall line adjusts delivery direction, and curvature near release sets hook. A tap or short accidental gesture never throws.
+- **PC:** hold the mouse button, pull back, and drive forward; direction and curvature remain physical. Keyboard controls position and angle only, never the delivery.
 
-Motion or touch is a player preference, switchable at any time in Settings, and the game must never assume one. Both produce the same physics inputs — position, angle, speed, rotation — so a motion player and a touch player are mechanically equal.
+Motion or touch is a player preference in Solo and vs CPU only. Both produce the same four physics inputs — position, angle, speed, rotation — so neither control method receives a mechanical advantage. A phone without a gyroscope simply omits the motion toggle and uses touch.
 
 ---
 

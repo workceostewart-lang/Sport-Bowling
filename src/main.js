@@ -2,10 +2,12 @@ import "./styles.css";
 import { BowlingScene } from "./bowling-scene.js";
 import { BowlingGame, detectSplit } from "./scoring.js";
 import { clamp, motionThrow, throwFromPointerPath } from "./input.js";
+import { canControllerThrow, normalizeAssignments, upsertPairedController } from "./modes.js";
 
 const app = document.querySelector("#app");
 const query = new URLSearchParams(window.location.search);
 const controllerCode = sanitizeRoomCode(query.get("controller") ?? "");
+const controllerMode = ["tv", "family"].includes(query.get("mode")) ? query.get("mode") : "motion";
 
 const BALLS = [
   { name: "Midas", color: "#D4AF37", weight: 15, hook: 8, speed: 6 },
@@ -31,19 +33,24 @@ const state = {
   games: [],
   players: [],
   currentPlayer: 0,
-  familyMode: true,
+  playMode: "solo",
+  familyMode: false,
   playerCount: 2,
+  roomPurpose: "",
   roomCode: "",
   roomTransport: null,
+  controllers: [],
   lastInputLatencyMs: null,
   reducedEffects: matchMedia("(prefers-reduced-motion: reduce)").matches,
-  assist: true,
+  motionAvailable: isLikelyPhoneWithMotionApis(),
+  motionEnabled: false,
+  motionMessage: "",
   sound: true,
   lastHelpSection: "basics",
 };
 
 if (controllerCode) {
-  renderPhoneController(controllerCode);
+  renderPhoneController(controllerCode, controllerMode);
 } else {
   const scene = new BowlingScene({
     onRollComplete: handleRollComplete,
@@ -76,9 +83,31 @@ if (controllerCode) {
   });
 
   let pointerPath = null;
+  let soloMotionCapture = null;
+  let soloMotionListenerAttached = false;
+
+  const recordSoloMotion = (event) => {
+    if (!soloMotionCapture) return;
+    const acceleration = event.accelerationIncludingGravity || event.acceleration;
+    const rotationRate = event.rotationRate;
+    if (!acceleration || !rotationRate) return;
+    const magnitude = Math.hypot(acceleration.x || 0, acceleration.y || 0, acceleration.z || 0);
+    soloMotionCapture.peakAcceleration = Math.max(soloMotionCapture.peakAcceleration, magnitude);
+    if (Math.abs(rotationRate.gamma || 0) > Math.abs(soloMotionCapture.peakRotation)) soloMotionCapture.peakRotation = rotationRate.gamma || 0;
+    if (Math.abs(acceleration.x || 0) > Math.abs(soloMotionCapture.lateralAcceleration)) soloMotionCapture.lateralAcceleration = acceleration.x || 0;
+  };
+
   app.addEventListener("pointerdown", (event) => {
-    const stage = event.target.closest(".lane-stage, .throw-surface");
+    const stage = event.target.closest(".lane-stage");
     if (!stage || state.screen !== "game" || scene.rolling) return;
+    if (state.motionEnabled && !state.multiplayer) {
+      soloMotionCapture = { peakAcceleration: 0, peakRotation: 0, lateralAcceleration: 0, stage };
+      stage.setPointerCapture?.(event.pointerId);
+      stage.classList.add("is-dragging");
+      updateThrowInstruction("ARMED · SWING · RELEASE");
+      return;
+    }
+    if (state.multiplayer) return;
     pointerPath = [{ x: event.clientX, y: event.clientY, at: performance.now() }];
     pointerPath.stage = stage;
     stage.setPointerCapture?.(event.pointerId);
@@ -86,29 +115,43 @@ if (controllerCode) {
   });
 
   app.addEventListener("pointermove", (event) => {
+    if (soloMotionCapture) return;
     if (!pointerPath) return;
     pointerPath.push({ x: event.clientX, y: event.clientY, at: performance.now() });
     if (pointerPath.length > 32) pointerPath.splice(1, pointerPath.length - 32);
   });
 
   app.addEventListener("pointerup", (event) => {
+    if (soloMotionCapture) {
+      const capture = soloMotionCapture;
+      soloMotionCapture = null;
+      capture.stage.classList.remove("is-dragging");
+      const input = motionThrow({ ...capture, position: state.board, angle: state.aim });
+      if (!input) {
+        updateThrowInstruction("SWING NEEDED · TRY AGAIN");
+        return;
+      }
+      applyThrowInput(input);
+      return;
+    }
     if (!pointerPath) return;
     const stage = pointerPath.stage;
     pointerPath.push({ x: event.clientX, y: event.clientY, at: performance.now() });
     const input = throwFromPointerPath(pointerPath, {
       width: stage.clientWidth,
       height: stage.clientHeight,
-      assist: state.assist,
+      position: state.board,
+      angle: state.aim,
     });
     pointerPath = null;
     stage.classList.remove("is-dragging");
     if (!input) return;
-    state.speed = input.speed;
-    state.rotation = input.rotation;
-    rollBall();
+    applyThrowInput(input);
   });
 
   app.addEventListener("pointercancel", () => {
+    soloMotionCapture?.stage?.classList.remove("is-dragging");
+    soloMotionCapture = null;
     pointerPath?.stage?.classList.remove("is-dragging");
     pointerPath = null;
   });
@@ -116,6 +159,10 @@ if (controllerCode) {
   function activate(action, target) {
     switch (action) {
       case "menu":
+        state.roomTransport?.close?.();
+        state.roomTransport = null;
+        state.roomPurpose = "";
+        state.controllers = [];
         state.screen = "menu";
         state.game = null;
         state.games = [];
@@ -123,18 +170,19 @@ if (controllerCode) {
         renderMenu();
         break;
       case "play":
+        state.playMode = "solo";
+        state.familyMode = false;
         renderPlaySetup();
         break;
       case "set-mode":
-        state.familyMode = target.dataset.mode === "family";
-        if (!state.familyMode) state.playerCount = 1;
-        else if (state.playerCount < 2) state.playerCount = 2;
+        state.playMode = target.dataset.mode === "cpu" ? "cpu" : "solo";
+        state.familyMode = false;
         renderPlaySetup();
         break;
       case "set-players":
         state.playerCount = clamp(Number(target.dataset.players) || 2, 2, 4);
-        state.familyMode = true;
-        renderPlaySetup();
+        normalizeAssignments(state.controllers, state.playerCount);
+        renderMotionLobby("family");
         break;
       case "start-game":
       case "practice":
@@ -143,6 +191,26 @@ if (controllerCode) {
       case "multiplayer":
         renderMultiplayer();
         break;
+      case "tv-mode":
+        createMotionRoom("tv");
+        break;
+      case "family-mode":
+        createMotionRoom("family");
+        break;
+      case "pair-phone":
+        renderPhoneCodeEntry();
+        break;
+      case "pair-phone-code": {
+        const field = app.querySelector("#phone-room-code");
+        const code = sanitizeRoomCode(field?.value ?? "");
+        if (code.length !== 6) {
+          field?.setAttribute("aria-invalid", "true");
+          setStatus("Enter the complete 6-character room code.", "error");
+          return;
+        }
+        window.location.assign(`${window.location.pathname}?controller=${code}&mode=motion`);
+        break;
+      }
       case "create-room":
         state.roomCode = makeRoomCode();
         renderMultiplayer("host");
@@ -167,12 +235,15 @@ if (controllerCode) {
       case "share-controller":
         shareControllerLink();
         break;
-      case "test-remote":
-        state.roomTransport?.send({ type: "swing", position: state.board, angle: state.aim, speed: 0.74, rotation: 0.16, source: "test" });
-        setStatus("Test swing sent. Start the lane to use it.", "success");
-        break;
       case "start-room-game":
-        startGame(false, true);
+        if (state.roomPurpose === "tv" || state.roomPurpose === "family") startMotionRoomGame();
+        else startGame(false, true);
+        break;
+      case "assign-controller":
+        assignController(target.dataset.controllerId, Number(target.dataset.player));
+        break;
+      case "controllers":
+        if (!scene.rolling) renderControllerAssignmentsLayer();
         break;
       case "balls":
         renderBalls();
@@ -199,9 +270,8 @@ if (controllerCode) {
       case "settings":
         renderSettings();
         break;
-      case "toggle-assist":
-        state.assist = !state.assist;
-        renderSettings();
+      case "toggle-motion":
+        void toggleSoloMotion();
         break;
       case "toggle-effects":
         state.reducedEffects = !state.reducedEffects;
@@ -219,9 +289,6 @@ if (controllerCode) {
       case "resume":
         scene.setPaused(false);
         document.querySelector(".pause-layer")?.classList.remove("open");
-        break;
-      case "roll":
-        rollBall();
         break;
       case "board-left":
         state.board = clamp(state.board - 1, 1, 39);
@@ -251,6 +318,30 @@ if (controllerCode) {
     }
   }
 
+  async function toggleSoloMotion() {
+    if (state.motionEnabled) {
+      state.motionEnabled = false;
+      state.motionMessage = "Touch swipe is active.";
+      updateMotionUi();
+      return;
+    }
+    const available = await requestRequiredMotionSensors();
+    if (!available) {
+      state.motionAvailable = false;
+      state.motionEnabled = false;
+      state.motionMessage = "Gyroscope not found. Touch swipe remains active.";
+      updateMotionUi();
+      return;
+    }
+    if (!soloMotionListenerAttached) {
+      window.addEventListener("devicemotion", recordSoloMotion, { passive: true });
+      soloMotionListenerAttached = true;
+    }
+    state.motionEnabled = true;
+    state.motionMessage = "Hold the lane, swing the phone, and release.";
+    updateMotionUi();
+  }
+
   function renderMenu() {
     state.screen = "menu";
     app.innerHTML = `
@@ -267,7 +358,7 @@ if (controllerCode) {
             </div>
             <button class="hero-play" data-action="play">
               <span class="play-icon" aria-hidden="true">▶</span>
-              <span><b>PLAY</b><small>Family Bowl · solo or 2–4 players</small></span>
+              <span><b>PLAY</b><small>Solo or vs CPU · touch or optional motion</small></span>
               <i aria-hidden="true">→</i>
             </button>
           </div>
@@ -278,10 +369,15 @@ if (controllerCode) {
               <span><b>Guest Bowler</b><small>Level 1 · House Shot</small></span>
               <span class="level-ring">01</span>
             </div>
-            <button class="menu-tile multiplayer" data-action="multiplayer">
-              <span class="tile-icon">⌁</span><span><b>MULTIPLAYER</b><small>Room code · phone remote</small></span><i>→</i>
+            <button class="menu-tile tv-mode" data-action="tv-mode">
+              <span class="tile-icon">▣</span><span><b>TV MODE</b><small>Solo · phone motion controller</small></span><i>→</i>
+            </button>
+            <button class="menu-tile family-mode" data-action="family-mode">
+              <span class="tile-icon">◆</span><span><b>FAMILY MODE</b><small>MOTION CONTROLS REQUIRED · 2–4 players</small></span><i>→</i>
             </button>
             <div class="menu-grid">
+              <button class="menu-tile multiplayer" data-action="multiplayer"><span class="tile-icon">⌁</span><span><b>ONLINE</b><small>Room-code multiplayer</small></span></button>
+              <button class="menu-tile" data-action="pair-phone"><span class="tile-icon">▯</span><span><b>PAIR PHONE</b><small>Enter a TV or Family room code</small></span></button>
               <button class="menu-tile" data-action="practice"><span class="tile-icon">◎</span><span><b>PRACTICE</b><small>Free roll</small></span></button>
               <button class="menu-tile" data-action="balls"><span class="tile-icon">●</span><span><b>MY BALLS</b><small>${BALLS[state.selectedBall].name}</small></span></button>
               <button class="menu-tile" data-action="stats"><span class="tile-icon">⌁</span><span><b>MY STATS</b><small>Games & averages</small></span></button>
@@ -292,7 +388,6 @@ if (controllerCode) {
         </div>
       </section>`;
     scene.mount(app.querySelector("#lane-mount"), "menu");
-    scene.setFamilyMode(false);
     scene.setPaused(false);
     scene.resize();
   }
@@ -300,35 +395,35 @@ if (controllerCode) {
   function renderPlaySetup() {
     state.screen = "setup";
     const ball = BALLS[state.selectedBall];
-    const family = state.familyMode;
+    const vsCpu = state.playMode === "cpu";
     app.innerHTML = `
       <section class="sub-screen setup-screen screen-enter">
         ${subHeader("Choose your game", "menu", "SIMPLE START · NO ACCOUNT NEEDED")}
         <div class="setup-layout">
-          <article class="mode-card selected ${family ? "family-mode" : ""}">
-            <span class="mode-number">${family ? "FZ" : "01"}</span><span class="mode-kicker">${family ? "PASS · PLAY · CHEER" : "AUTHENTIC SOLO"}</span>
-            <h2>${family ? "FAMILY BOWL" : "QUICK PLAY"}</h2>
-            <p>${family ? "Hand the device around and bowl together. Smart bumpers, helpful aim, and forgiving rolls keep every age in the game." : "One regulation game on the House Shot. Authentic scoring, one simple swipe, no pressure."}</p>
-            <div class="mode-meta">${family ? `<span>${state.playerCount} BOWLERS</span><span>SMART BUMPERS</span><span>TAKE TURNS</span>` : "<span>10 FRAMES</span><span>HOUSE 40'</span><span>~8 MIN</span>"}</div>
+          <article class="mode-card selected">
+            <span class="mode-number">${vsCpu ? "02" : "01"}</span><span class="mode-kicker">${vsCpu ? "TAKE ON THE HOUSE" : "AUTHENTIC SOLO"}</span>
+            <h2>${vsCpu ? "VS CPU" : "QUICK PLAY"}</h2>
+            <p>${vsCpu ? "Alternate complete frames against a friendly CPU bowler. Your delivery still comes only from your swipe or phone motion." : "One regulation game on the House Shot. Every throw reads the speed, direction, and curve of your real swipe or swing."}</p>
+            <div class="mode-meta"><span>10 FRAMES</span><span>NO THROW BUTTON</span><span>${vsCpu ? "ALTERNATING" : "~8 MIN"}</span></div>
           </article>
           <div class="quick-config">
             <div class="mode-switch" aria-label="Play style">
-              <button data-action="set-mode" data-mode="family" class="${family ? "active" : ""}"><b>FAMILY</b><small>2–4 players</small></button>
-              <button data-action="set-mode" data-mode="solo" class="${!family ? "active" : ""}"><b>SOLO</b><small>Just me</small></button>
+              <button data-action="set-mode" data-mode="solo" class="${!vsCpu ? "active" : ""}"><b>SOLO</b><small>Just me</small></button>
+              <button data-action="set-mode" data-mode="cpu" class="${vsCpu ? "active" : ""}"><b>VS CPU</b><small>Alternate frames</small></button>
             </div>
-            ${family ? `<div class="family-config"><span><b>HOW MANY BOWLERS?</b><small>Pass the same device after each frame</small></span><div class="player-count">${[2, 3, 4].map((count) => `<button data-action="set-players" data-players="${count}" class="${state.playerCount === count ? "active" : ""}">${count}</button>`).join("")}</div></div>` : ""}
+            ${state.motionAvailable ? `<button class="motion-choice ${state.motionEnabled ? "active" : ""}" data-action="toggle-motion"><span><b>Motion Controls: ${state.motionEnabled ? "On" : "Off"}</b><small>${state.motionEnabled ? "Hold the lane, swing the phone, release" : "Touch swipe controls the delivery"}</small></span><i>${state.motionEnabled ? "ON" : "OFF"}</i></button>` : ""}
+            ${state.motionMessage ? `<div class="input-message">${state.motionMessage}</div>` : ""}
             <div class="config-title"><span>YOUR BALL</span><button data-action="balls">CHANGE</button></div>
             <button class="ball-choice" data-action="balls">
               <span class="ball-orb" style="--ball:${ball.color}"><i></i><i></i><i></i></span>
               <span><b>${ball.name}</b><small>${ball.weight} LB · Hook ${ball.hook}/10 · Speed ${ball.speed}/10</small></span><em>›</em>
             </button>
-            <label class="assist-choice"><span><b>${family ? "Family assists are ready" : "Trajectory assist"}</b><small>${family ? "Smart bumpers · gentle-roll boost · aim guide" : "Shows your predicted line"}</small></span><input type="checkbox" checked disabled><i></i></label>
-            <button class="primary-button ${family ? "family-button" : ""}" data-action="start-game"><span>${family ? "START FAMILY BOWL" : "BOWL NOW"}</span><small>${family ? "Everyone gets a turn" : "Step onto lane 07"}</small><i>→</i></button>
+            <button class="primary-button" data-action="start-game"><span>${vsCpu ? "BOWL VS CPU" : "BOWL SOLO"}</span><small>${state.motionEnabled ? "Motion is on" : "Swipe controls every delivery"}</small><i>→</i></button>
           </div>
           <div class="other-modes">
+            <button data-action="tv-mode"><b>TV MODE</b><small>Phone motion · solo</small><i>→</i></button>
+            <button data-action="family-mode"><b>FAMILY MODE</b><small>Motion required · 2–4</small><i>→</i></button>
             <button data-action="practice"><b>PRACTICE</b><small>Free roll · no score</small><i>→</i></button>
-            <button class="locked"><b>CAREER</b><small>40-lane tour · coming next</small><i>◇</i></button>
-            <button class="locked"><b>SPARE CHALLENGE</b><small>Pin drills · coming next</small><i>◇</i></button>
           </div>
         </div>
       </section>`;
@@ -338,16 +433,18 @@ if (controllerCode) {
     state.screen = "game";
     state.practice = practice;
     state.multiplayer = multiplayer;
-    const useFamily = state.familyMode && !practice && !multiplayer;
-    const playerCount = useFamily ? state.playerCount : 1;
+    const useFamily = multiplayer && state.roomPurpose === "family";
+    const useTv = multiplayer && state.roomPurpose === "tv";
+    const useCpu = !practice && !multiplayer && state.playMode === "cpu";
+    state.vsCpu = useCpu;
+    const playerCount = useFamily ? state.playerCount : useCpu ? 2 : 1;
     state.players = Array.from({ length: playerCount }, (_, index) => ({
-      name: useFamily ? `PLAYER ${index + 1}` : "YOU",
+      name: useFamily ? `PLAYER ${index + 1}` : useCpu && index === 1 ? "CPU" : "YOU",
       color: BALLS[(state.selectedBall + index) % BALLS.length].color,
     }));
     state.games = state.players.map(() => new BowlingGame());
     state.currentPlayer = 0;
     state.game = state.games[0];
-    scene.setFamilyMode(useFamily);
     scene.prepareNextBall({ fullRack: true });
     scene.setPosition(state.board);
     scene.setAim(state.aim);
@@ -358,17 +455,17 @@ if (controllerCode) {
           <div class="player-score"><span class="active-dot"></span><span><b id="current-player-name">${state.players[0].name}</b><small id="player-mode">${BALLS[state.selectedBall].name.toUpperCase()} · ${useFamily ? "FAMILY BOWL" : practice ? "PRACTICE" : multiplayer ? `ROOM ${state.roomCode}` : "HOUSE SHOT"}</small></span></div>
           <div id="scoreboard" class="scoreboard">${scoreboardMarkup()}</div>
           <div class="total-score"><small>TOTAL</small><b id="total-score">0</b></div>
-          <button class="hud-button help-hud" data-action="help" data-section="controls" aria-label="How to play">?</button>
+          ${useFamily || useTv ? '<button class="hud-button controller-hud" data-action="controllers" aria-label="Phone assignments">▯</button>' : '<button class="hud-button help-hud" data-action="help" data-section="controls" aria-label="How to play">?</button>'}
         </header>
 
         <div class="game-main">
           <aside id="player-rail-content" class="player-rail">${playerRailMarkup()}</aside>
-          <div id="lane-stage" class="lane-stage" aria-label="Bowling lane. Hold, pull back, then flick forward to roll. Curve the flick to hook." tabindex="0">
+          <div id="lane-stage" class="lane-stage" aria-label="Bowling lane. Pull back and swipe forward to deliver the ball. Swipe direction sets the line and curvature sets hook." tabindex="0">
             <div id="lane-mount" class="lane-mount"></div>
-            <div class="lane-readout top-left"><span>LANE 07</span><b>${useFamily ? "SMART BUMPERS ✓" : "HOUSE 40'"}</b></div>
+            <div class="lane-readout top-left"><span>LANE 07</span><b>${useFamily ? "FAMILY MOTION" : useTv ? "TV MOTION" : useCpu ? "VS CPU" : "HOUSE 40'"}</b></div>
             <div class="lane-readout top-right"><span>FRAME <b id="frame-readout">1</b></span><span>BALL <b id="ball-readout">1</b></span></div>
             <div class="aim-reticle" aria-hidden="true"><i></i><span>AIM <b id="aim-board">${state.aim}</b></span></div>
-            <div id="roll-callout" class="roll-callout"><b>HOLD · PULL BACK · FLICK</b><span>${useFamily ? "Smart bumpers and gentle-roll help are on" : "Flick speed sets power · curve sets hook"}</span></div>
+            <div id="roll-callout" class="roll-callout"><b id="throw-instruction">${multiplayer ? "WAITING FOR MOTION RELEASE" : state.motionEnabled ? "HOLD · SWING · RELEASE" : "PULL BACK · SWIPE FORWARD"}</b><span>${multiplayer ? "Aim here · swing on the paired phone" : state.motionEnabled ? "Accelerometer sets speed · gyroscope sets hook" : "Speed, direction, and curvature become the delivery"}</span></div>
             <div id="result-callout" class="result-callout" aria-live="assertive"></div>
           </div>
         </div>
@@ -382,8 +479,8 @@ if (controllerCode) {
             <small>2 · ANGLE</small>
             <div><button data-action="aim-left" aria-label="Turn aim left">↶</button><b id="aim-label">BOARD ${state.aim}</b><button data-action="aim-right" aria-label="Turn aim right">↷</button></div>
           </div>
-          <button class="throw-surface roll-button" data-action="roll" aria-label="Throw. Hold, pull back, and flick forward. Tap or press Space for a gentle accessible roll."><i>↑</i><span><b>3 · THROW</b><small>Hold · pull back · flick forward</small></span></button>
-          <div class="physical-input-note"><b>NO METERS</b><span>Speed and hook come from your flick</span></div>
+          <div class="delivery-note ${multiplayer ? "motion-only" : ""}"><i>↟</i><span><b>3 · ${multiplayer ? "PHONE MOTION" : state.motionEnabled ? "SWING THE PHONE" : "SWIPE ON THE LANE"}</b><small>${multiplayer ? "No local throw control" : state.motionEnabled ? "Hold the lane · swing · release" : "Pull back · drive forward · curve to hook"}</small></span></div>
+          ${state.motionAvailable && !multiplayer ? `<button class="game-motion-toggle ${state.motionEnabled ? "active" : ""}" data-action="toggle-motion"><b>Motion Controls: ${state.motionEnabled ? "On" : "Off"}</b><span>Switch between frames</span></button>` : '<div class="physical-input-note"><b>NO TAP THROW</b><span>Every roll comes from movement</span></div>'}
         </footer>
 
         <div class="pause-layer" role="dialog" aria-modal="true" aria-label="Game paused">
@@ -398,6 +495,91 @@ if (controllerCode) {
     updateScoreboard();
   }
 
+  function renderPhoneCodeEntry() {
+    state.screen = "phone-code";
+    app.innerHTML = `
+      <section class="sub-screen phone-code-screen screen-enter">
+        ${subHeader("Pair this phone", "menu", "TV MODE · FAMILY MODE")}
+        <div class="phone-code-card">
+          <span class="eyebrow">PHONE CONTROLLER</span>
+          <h2>ENTER THE<br><em>ROOM CODE.</em></h2>
+          <p>The big screen shows a six-character code. This phone will check for both an accelerometer and gyroscope before it joins.</p>
+          <label class="room-input"><span>ROOM CODE</span><input id="phone-room-code" maxlength="6" inputmode="text" autocomplete="off" placeholder="K7P2QX"><button data-action="pair-phone-code">PAIR PHONE →</button></label>
+          <div id="status" class="status-line">A gyroscope is required for wrist rotation and hook.</div>
+        </div>
+      </section>`;
+  }
+
+  function createMotionRoom(purpose) {
+    state.roomPurpose = purpose;
+    state.familyMode = purpose === "family";
+    state.playerCount = purpose === "family" ? Math.max(2, state.playerCount) : 1;
+    state.controllers = [];
+    state.roomCode = makeRoomCode();
+    renderMotionLobby(purpose);
+    connectHostRoom();
+  }
+
+  function renderMotionLobby(purpose = state.roomPurpose) {
+    state.screen = "motion-lobby";
+    const family = purpose === "family";
+    const link = controllerLink(state.roomCode, purpose);
+    app.innerHTML = `
+      <section class="sub-screen motion-lobby-screen screen-enter">
+        ${subHeader(family ? "Family Mode" : "TV Mode", "menu", "MOTION CONTROLS · GYROSCOPE REQUIRED")}
+        <div class="motion-lobby-layout">
+          <aside>
+            <span class="eyebrow">${family ? "PASS · PLAY · CHEER" : "SOLO ON THE BIG SCREEN"}</span>
+            <h2>${family ? "PAIR THE\nFAMILY." : "PHONE IN HAND.\nLANE ON TV."}</h2>
+            <p>${family ? "Players can share one phone or pair several. Assign each paired phone to a player, or mark it Shared for pass-and-play." : "Keep this screen on the TV. Enter the room code on your phone, verify its gyroscope, then use the phone only for the bowling motion."}</p>
+            ${family ? `<div class="family-config"><span><b>HOW MANY PLAYERS?</b><small>Assignments can change between frames</small></span><div class="player-count">${[2, 3, 4].map((count) => `<button data-action="set-players" data-players="${count}" class="${state.playerCount === count ? "active" : ""}">${count}</button>`).join("")}</div></div>` : ""}
+          </aside>
+          <div class="motion-room-card">
+            <div class="room-heading"><span>ROOM CODE</span><b>${state.roomCode}</b><small>On the phone, choose Pair Phone and enter this code</small></div>
+            <div id="paired-roster" class="paired-roster">${motionRosterMarkup()}</div>
+            <div class="controller-link"><span>DIRECT PHONE LINK</span><code>${escapeHtml(link.replace(/^https?:\/\//, ""))}</code><div><button data-action="copy-controller">COPY LINK</button><button data-action="share-controller">SHARE</button></div></div>
+            <div id="status" class="status-line">Waiting for a gyroscope-equipped phone.</div>
+            <button id="start-motion-room" class="primary-button ${family ? "family-button" : ""}" data-action="start-room-game" ${state.controllers.length ? "" : "disabled"}><span>START ${family ? "FAMILY" : "TV"} BOWL</span><small>${state.controllers.length ? `${state.controllers.length} phone${state.controllers.length === 1 ? "" : "s"} paired` : "Pair at least one phone"}</small><i>→</i></button>
+          </div>
+        </div>
+      </section>`;
+  }
+
+  function motionRosterMarkup() {
+    if (!state.controllers.length) return '<div class="empty-controller"><i>▯</i><span><b>NO PHONES PAIRED</b><small>Gyroscope verification happens before a phone appears here.</small></span></div>';
+    return state.controllers.map((controller, index) => `
+      <article class="paired-controller">
+        <i>${index + 1}</i><span><b>${escapeHtml(controller.name)}</b><small>GYROSCOPE VERIFIED · ${controller.local ? "LOCAL LINK" : "CONNECTED"}</small></span>
+        ${state.roomPurpose === "family" ? `<div class="assignment-buttons" aria-label="Assign ${escapeHtml(controller.name)}"><button data-action="assign-controller" data-controller-id="${escapeHtml(controller.id)}" data-player="-1" class="${controller.player === -1 ? "active" : ""}">SHARED</button>${Array.from({ length: state.playerCount }, (_, player) => `<button data-action="assign-controller" data-controller-id="${escapeHtml(controller.id)}" data-player="${player}" class="${controller.player === player ? "active" : ""}">P${player + 1}</button>`).join("")}</div>` : '<em>PLAYER 1</em>'}
+      </article>`).join("");
+  }
+
+  function assignController(controllerId, player) {
+    const controller = state.controllers.find((item) => item.id === controllerId);
+    if (!controller || (player < -1 || player >= state.playerCount)) return;
+    controller.player = player;
+    state.roomTransport?.send({ type: "assignment", targetControllerId: controller.id, player });
+    if (state.screen === "motion-lobby") renderMotionLobby();
+    else renderControllerAssignmentsLayer();
+  }
+
+  function startMotionRoomGame() {
+    if (!state.controllers.length) {
+      setStatus("Pair at least one gyroscope-equipped phone before starting.", "error");
+      return;
+    }
+    state.familyMode = state.roomPurpose === "family";
+    startGame(false, true);
+  }
+
+  function renderControllerAssignmentsLayer() {
+    const layer = document.querySelector(".pause-layer");
+    if (!layer) return;
+    scene.setPaused(true);
+    layer.innerHTML = `<div class="pause-card controller-assignment-card"><span class="eyebrow">PHONE ASSIGNMENTS</span><h2>${state.roomPurpose === "family" ? "WHO IS BOWLING?" : "TV CONTROLLER"}</h2><div class="paired-roster">${motionRosterMarkup()}</div><button class="primary-button" data-action="resume">BACK TO LANE <i>→</i></button></div>`;
+    layer.classList.add("open");
+  }
+
   function renderMultiplayer(mode = "entry") {
     state.screen = "multiplayer";
     const hasRoom = Boolean(state.roomCode);
@@ -408,7 +590,7 @@ if (controllerCode) {
         <div class="multi-layout">
           <aside class="multi-intro">
             <span class="eyebrow">PLAY TOGETHER</span><h2>YOUR PHONE<br><em>IS THE BALL.</em></h2>
-            <p>Create a room on the big screen, open its controller link on a phone, then hold, swing, and release. A touch-flick fallback is always available.</p>
+            <p>Online play uses room codes. For a phone motion controller on the same network, use TV Mode or Family Mode from the main menu.</p>
             <div class="phone-remote-art" aria-hidden="true"><span class="signal signal-a"></span><span class="signal signal-b"></span><div><i>●</i><b>SWING</b><small>REMOTE</small></div></div>
             <ul><li><b>1</b>Create or join a room</li><li><b>2</b>Open the controller link on your phone</li><li><b>3</b>Hold tight and swing forward</li></ul>
           </aside>
@@ -424,7 +606,7 @@ if (controllerCode) {
               <button class="primary-button purple-button" data-action="start-room-game"><span>START MATCH</span><small>Remote can connect at any time</small><i>→</i></button>
             ` : `
               <div class="multi-tabs"><button class="active">CREATE</button><button>JOIN</button></div>
-              <div class="create-panel"><span class="step-label">HOST A LANE</span><h3>Create a room in one tap.</h3><p>Private by default. The room stays open for instant rematches.</p><button class="primary-button purple-button" data-action="create-room"><span>CREATE ROOM</span><small>6-character private code</small><i>→</i></button></div>
+              <div class="create-panel"><span class="step-label">HOST A LANE</span><h3>Create a private room.</h3><p>The room stays private by default and open for instant rematches.</p><button class="primary-button purple-button" data-action="create-room"><span>CREATE ROOM</span><small>6-character private code</small><i>→</i></button></div>
               <div class="join-divider"><span>OR JOIN A ROOM</span></div>
               <label class="room-input"><span>ROOM CODE</span><input id="room-code" maxlength="6" inputmode="text" autocomplete="off" placeholder="K7P2QX" oninput="this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,'')"><button data-action="join-room">JOIN →</button></label>
               <div id="status" class="status-line"></div>
@@ -438,30 +620,36 @@ if (controllerCode) {
   function connectHostRoom() {
     state.roomTransport?.close?.();
     state.roomTransport = createRoomTransport(state.roomCode, "host", (message) => {
-      if (message.type === "connected" || message.type === "controller-ready") {
-        const remote = document.querySelector("#remote-player");
-        remote?.classList.add("connected");
-        const label = document.querySelector("#remote-state");
-        if (label) label.textContent = "MOTION REMOTE CONNECTED";
-        setStatus("Phone connected — swing when the lane is ready.", "success");
+      if (message.type === "pair-request" && message.gyro === true && message.controllerId) {
+        const controller = upsertPairedController(state.controllers, message, state.roomPurpose);
+        state.roomTransport?.send({ type: "pair-accepted", targetControllerId: controller.id, purpose: state.roomPurpose, player: controller.player });
+        state.roomTransport?.send({ type: "aim-state", targetControllerId: controller.id, position: state.board, angle: state.aim });
+        if (state.screen === "motion-lobby") renderMotionLobby();
+        setStatus(`${controller.name} paired with gyroscope verified.`, "success");
       }
       if (message.type === "local-input-ready") {
-        const label = document.querySelector("#remote-state");
-        if (label) label.textContent = "LOCAL INPUT READY";
-        setStatus("Direct local input is ready — no server round trip.", "success");
+        setStatus("Direct local motion link ready — no input server round trip.", "success");
       }
       if (message.type === "local-input-closed") setStatus("Local input paused. Keep both devices on the same Wi-Fi.", "error");
+      if (message.type === "disconnected" && message.controllerId) {
+        state.controllers = state.controllers.filter((controller) => controller.id !== message.controllerId);
+        if (state.screen === "motion-lobby") renderMotionLobby();
+      }
       if (message.type === "swing") {
-        if (state.screen !== "game") startGame(false, true);
+        if (state.screen !== "game") return;
+        if (!canControllerThrow(state.controllers, message.controllerId, state.roomPurpose, state.currentPlayer)) {
+          state.roomTransport?.send({ type: "turn-denied", targetControllerId: message.controllerId, player: state.currentPlayer });
+          return;
+        }
         state.lastInputLatencyMs = Number(message.releasedAt) > 0 ? Math.max(0, Date.now() - Number(message.releasedAt)) : null;
         document.documentElement.dataset.inputLatency = state.lastInputLatencyMs === null ? "unknown" : String(state.lastInputLatencyMs);
-        state.board = clamp(Number(message.position) || state.board, 1, 39);
-        state.aim = clamp(Number(message.angle) || state.aim, 1, 39);
-        state.speed = clamp(Number(message.speed ?? message.power) || 0.64, 0.25, 1);
-        state.rotation = clamp(Number(message.rotation ?? message.spin) || 0, -1, 1);
-        scene.setPosition(state.board);
-        scene.setAim(state.aim);
-        rollBall();
+        const remoteSpeed = Number(message.speed);
+        applyThrowInput({
+          position: clamp(Number(message.position) || state.board, 1, 39),
+          angle: clamp(Number(message.angle) || state.aim, 1, 39),
+          speed: clamp(Number.isFinite(remoteSpeed) ? remoteSpeed : 0, 0, 1),
+          rotation: clamp(Number(message.rotation) || 0, -1, 1),
+        });
       }
     });
   }
@@ -497,7 +685,7 @@ if (controllerCode) {
       <section class="sub-screen settings-screen screen-enter">
         ${subHeader("Settings", "menu", "DEVICE PREFERENCES")}
         <div class="settings-layout"><aside><span class="eyebrow">GAME SETTINGS</span><h2>MAKE THE LANE<br><em>YOURS.</em></h2><p>Preferences are saved on this device.</p></aside><div class="settings-list">
-          ${settingRow("Trajectory assist", "Predicted path while you aim", state.assist, "toggle-assist")}
+          ${state.motionAvailable ? settingRow("Motion Controls", "Optional for Solo and vs CPU on this phone", state.motionEnabled, "toggle-motion") : ""}
           ${settingRow("Full effects", "Flat fire ribbon and strike bursts", !state.reducedEffects, "toggle-effects")}
           ${settingRow("Sound", "Lane ambience, roll, and pin impact", state.sound, "toggle-sound")}
           <div class="setting-row"><span><b>Orientation</b><small>Follows your device; PC uses landscape</small></span><em>AUTO</em></div>
@@ -512,7 +700,7 @@ if (controllerCode) {
     state.lastHelpSection = section;
     const sections = {
       basics: ["THE BASICS", "Ten frames. Ten pins. Roll twice unless your first ball is a strike. Knock down all ten across two balls for a spare.", ["X = strike", "/ = spare", "– = zero pins", "F = foul"]],
-      controls: ["THREE SIMPLE STEPS", "Move left or right, turn toward a lane board, then hold, pull back, and flick forward. Flick speed sets power and the release curve sets hook — no meters to watch.", ["A / D moves your feet", "Arrow keys turn your aim", "Mouse or touch: hold and flick", "Space sends a gentle accessible roll"]],
+      controls: ["THREE PHYSICAL STEPS", "Move left or right, turn toward a lane board, then make a real delivery. A swipe carries its own speed, direction, and curvature. Motion uses swing acceleration and wrist rotation.", ["A / D moves your feet", "Arrow keys turn your aim", "Touch: pull back and swipe forward", "There is no tap or roll button"]],
       scoring: ["READ THE SCORE", "A strike earns 10 plus your next two balls. A spare earns 10 plus your next ball. In frame ten, a strike or spare earns bonus rolls.", ["Maximum score: 300", "Twelve strikes make perfect", "Pending bonuses show —", "Raw pinfall is never hidden"]],
       multiplayer: ["BOWL TOGETHER", "Create a room, share its six-character code, and start when everyone is ready. Guests join without an account.", ["2–8 bowlers", "Sprint or 10 frames", "Phone motion remote", "Instant rematch"]],
       tips: ["FIND THE POCKET", "Right-handers aim between pins 1 and 3; left-handers between 1 and 2. A controlled entry angle carries more pins than raw speed.", ["Move your feet first", "Use a smooth forward flick", "Curve only near release", "Treat spares seriously"]],
@@ -520,7 +708,7 @@ if (controllerCode) {
     const [title, copy, bullets] = sections[section] ?? sections.basics;
     app.innerHTML = `
       <section class="sub-screen help-screen screen-enter">
-        ${subHeader("How to Play", state.game ? "resume" : "menu", "ALWAYS ONE TAP AWAY")}
+        ${subHeader("How to Play", state.game ? "resume" : "menu", "AVAILABLE FROM EVERY MODE")}
         <div class="help-layout"><nav aria-label="How to play sections">${Object.entries(sections).map(([key, value], index) => `<button data-action="help-section" data-section="${key}" class="${key === section ? "active" : ""}"><span>${String(index + 1).padStart(2, "0")}</span><b>${value[0]}</b><i>→</i></button>`).join("")}</nav>
           <article><span class="eyebrow">${section.toUpperCase()}</span><h2>${title}</h2><p>${copy}</p><div class="help-points">${bullets.map((item, index) => `<div><b>${index + 1}</b><span>${item}</span></div>`).join("")}</div>${section === "controls" ? '<div class="swipe-demo"><i>●</i><span></span><b>PULL BACK · FLICK FORWARD</b></div>' : ""}<button class="primary-button" data-action="${state.game ? "resume" : "play"}">${state.game ? "BACK TO LANE" : "PLAY NOW"} <i>→</i></button></article></div>
       </section>`;
@@ -531,7 +719,7 @@ if (controllerCode) {
     if (!layer) return;
     if (!state.multiplayer) scene.setPaused(true);
     const content = {
-      controls: ["POSITION · ANGLE · THROW", "Move your start and angle with the labelled buttons. Then hold, pull back, and flick forward on the lane. Speed and release curve become power and hook automatically."],
+      controls: ["POSITION · ANGLE · DELIVERY", "Move your start and angle with the labelled buttons. Then pull back and swipe forward, or hold and swing when motion is enabled. Speed, direction, and wrist rotation are never automated."],
       scoring: ["READ THE SCORE", "A strike adds your next two balls. A spare adds your next one. Bonus rolls happen in frame ten."],
       multiplayer: ["ROOM PLAY", "Your turn stays live while this help card is open. Close it when you are ready to bowl."],
     }[section] ?? ["THE BASICS", "Knock down ten pins in ten frames. Strikes and spares earn bonus pinfall."];
@@ -542,23 +730,34 @@ if (controllerCode) {
   function renderPauseMenu() {
     const layer = document.querySelector(".pause-layer");
     if (!layer) return;
-    layer.innerHTML = `<div class="pause-card"><span class="eyebrow">LANE 07</span><h2>GAME PAUSED</h2><button class="primary-button" data-action="resume">RESUME <i>→</i></button><button data-action="help" data-section="controls">HOW TO PLAY</button><button data-action="menu">EXIT TO MENU</button></div>`;
+    layer.innerHTML = `<div class="pause-card"><span class="eyebrow">LANE 07</span><h2>GAME PAUSED</h2><button class="primary-button" data-action="resume">RESUME <i>→</i></button>${state.roomPurpose === "family" || state.roomPurpose === "tv" ? '<button data-action="controllers">PHONE ASSIGNMENTS</button>' : ""}<button data-action="help" data-section="controls">HOW TO PLAY</button><button data-action="menu">EXIT TO MENU</button></div>`;
     layer.classList.add("open");
   }
 
   function rollBall() {
     if (state.screen !== "game" || scene.rolling || state.game?.complete) return;
-    const family = state.familyMode && state.players.length > 1;
     const rolled = scene.roll({
-      speed: family ? clamp(state.speed, 0.46, 0.88) : state.speed,
-      rotation: family ? state.rotation * 0.62 : state.rotation,
-      angle: family ? Math.round(state.aim * 0.72 + 20 * 0.28) : state.aim,
+      speed: state.speed,
+      rotation: state.rotation,
+      angle: state.aim,
     });
     if (!rolled) return;
     document.querySelector("#roll-callout")?.classList.add("hidden");
     const result = document.querySelector("#result-callout");
     if (result) result.innerHTML = "";
     updateLiveControls();
+  }
+
+  function applyThrowInput(input) {
+    if (!input || state.screen !== "game" || scene.rolling) return false;
+    state.board = clamp(Number(input.position), 1, 39);
+    state.aim = clamp(Number(input.angle), 1, 39);
+    state.speed = clamp(Number(input.speed), 0, 1);
+    state.rotation = clamp(Number(input.rotation), -1, 1);
+    scene.setPosition(state.board);
+    scene.setAim(state.aim);
+    rollBall();
+    return true;
   }
 
   function handleRollComplete({ knocked, standingPins = [] }) {
@@ -589,12 +788,46 @@ if (controllerCode) {
         advanceFamilyTurn();
         return;
       }
+      if (state.vsCpu) {
+        if (state.currentPlayer === 0 && frameFinished) {
+          advanceCpuTurn(1);
+          return;
+        }
+        if (state.currentPlayer === 1 && frameFinished) {
+          advanceCpuTurn(0);
+          return;
+        }
+      }
       const fullRack = state.game.pinsStanding() === 10;
       scene.prepareNextBall({ fullRack });
       result?.classList.remove("show");
       document.querySelector("#roll-callout")?.classList.remove("hidden");
       updateScoreboard();
+      if (state.vsCpu && state.currentPlayer === 1) setTimeout(bowlCpuBall, 650);
     }, 1500);
+  }
+
+  function advanceCpuTurn(playerIndex) {
+    state.currentPlayer = playerIndex;
+    state.game = state.games[playerIndex];
+    scene.prepareNextBall({ fullRack: true });
+    updateScoreboard();
+    const result = document.querySelector("#result-callout");
+    if (result) {
+      result.innerHTML = `<b>${state.players[playerIndex].name}</b><span>${playerIndex === 1 ? "CPU is reading the lane." : "Your frame — make a real delivery."}</span>`;
+      result.classList.add("show", "turn-change");
+    }
+    setTimeout(() => {
+      result?.classList.remove("show", "turn-change");
+      if (playerIndex === 1) bowlCpuBall();
+      else document.querySelector("#roll-callout")?.classList.remove("hidden");
+    }, 800);
+  }
+
+  function bowlCpuBall() {
+    if (!state.vsCpu || state.currentPlayer !== 1 || scene.rolling || state.game?.complete) return;
+    const variation = () => (crypto.getRandomValues(new Uint32Array(1))[0] / 0xffffffff) * 2 - 1;
+    applyThrowInput({ position: 20, angle: clamp(20 + Math.round(variation() * 3), 1, 39), speed: clamp(0.58 + variation() * 0.18, 0.1, 1), rotation: variation() * 0.28 });
   }
 
   function advanceFamilyTurn() {
@@ -612,6 +845,7 @@ if (controllerCode) {
     }
     scene.prepareNextBall({ fullRack: true });
     updateScoreboard();
+    state.roomTransport?.send({ type: "turn-state", player: state.currentPlayer, position: state.board, angle: state.aim });
     const result = document.querySelector("#result-callout");
     if (result) {
       result.innerHTML = `<b>${state.players[state.currentPlayer].name}</b><span>Your turn — pick a line and roll.</span>`;
@@ -630,8 +864,9 @@ if (controllerCode) {
     const winner = totals.indexOf(best);
     const overlay = document.querySelector("#game-over");
     if (!overlay) return;
-    const familyResults = state.players.length > 1 ? `<div class="family-results">${state.players.map((player, index) => `<div class="${index === winner ? "winner" : ""}"><i style="background:${player.color}"></i><span><b>${player.name}</b><small>${index === winner ? "FAMILY CHAMPION ★" : "GREAT GAME"}</small></span><em>${totals[index]}</em></div>`).join("")}</div>` : `<div class="final-score"><b>${total}</b><small>FINAL SCORE</small></div>`;
-    overlay.innerHTML = `<div class="pause-card end-card"><span class="eyebrow">GAME COMPLETE</span><h2>${state.players.length > 1 ? `${state.players[winner].name} WINS!` : total >= 200 ? "LANE MASTER" : total >= 130 ? "SOLID GAME" : "FIRST GAME DOWN"}</h2>${familyResults}<p>${state.players.length > 1 ? "High fives all around. Keep everyone in the lineup for an instant rematch." : "Every frame is now on your card. Want another line at it?"}</p><button class="primary-button" data-action="new-game">PLAY AGAIN <i>→</i></button><button data-action="menu">MAIN MENU</button></div>`;
+    const isFamilyResult = state.familyMode && state.players.length > 1;
+    const multiplayerResults = state.players.length > 1 ? `<div class="family-results">${state.players.map((player, index) => `<div class="${index === winner ? "winner" : ""}"><i style="background:${player.color}"></i><span><b>${player.name}</b><small>${index === winner ? isFamilyResult ? "FAMILY CHAMPION ★" : "WINNER ★" : "GREAT GAME"}</small></span><em>${totals[index]}</em></div>`).join("")}</div>` : `<div class="final-score"><b>${total}</b><small>FINAL SCORE</small></div>`;
+    overlay.innerHTML = `<div class="pause-card end-card"><span class="eyebrow">GAME COMPLETE</span><h2>${state.players.length > 1 ? `${state.players[winner].name} WINS!` : total >= 200 ? "LANE MASTER" : total >= 130 ? "SOLID GAME" : "FIRST GAME DOWN"}</h2>${multiplayerResults}<p>${isFamilyResult ? "High fives all around. Keep everyone in the lineup for an instant rematch." : state.vsCpu ? "Friendly match complete. Adjust your line and challenge the house again." : "Every frame is now on your card. Want another line at it?"}</p><button class="primary-button" data-action="new-game">PLAY AGAIN <i>→</i></button><button data-action="menu">MAIN MENU</button></div>`;
     overlay.classList.add("open");
   }
 
@@ -673,7 +908,7 @@ if (controllerCode) {
     const currentName = document.querySelector("#current-player-name");
     if (currentName) currentName.textContent = state.players[state.currentPlayer]?.name ?? "YOU";
     const playerMode = document.querySelector("#player-mode");
-    if (playerMode) playerMode.textContent = state.players.length > 1 ? `FAMILY BOWL · ${state.currentPlayer + 1} OF ${state.players.length}` : state.multiplayer ? `ROOM ${state.roomCode}` : state.practice ? "PRACTICE" : "HOUSE SHOT";
+    if (playerMode) playerMode.textContent = state.vsCpu ? `VS CPU · ${state.currentPlayer === 0 ? "YOUR FRAME" : "CPU FRAME"}` : state.familyMode && state.players.length > 1 ? `FAMILY BOWL · ${state.currentPlayer + 1} OF ${state.players.length}` : state.multiplayer ? `ROOM ${state.roomCode}` : state.practice ? "PRACTICE" : "HOUSE SHOT";
     const rail = document.querySelector("#player-rail-content");
     if (rail) rail.innerHTML = playerRailMarkup();
   }
@@ -682,15 +917,38 @@ if (controllerCode) {
     textContent("#position-board", state.board);
     textContent("#aim-board", state.aim);
     textContent("#aim-label", `BOARD ${state.aim}`);
+    if (state.multiplayer) state.roomTransport?.send({ type: "aim-state", position: state.board, angle: state.aim });
+  }
+
+  function updateThrowInstruction(copy) {
+    textContent("#throw-instruction", copy);
+  }
+
+  function updateMotionUi() {
+    if (state.screen === "setup") {
+      renderPlaySetup();
+      return;
+    }
+    if (state.screen === "settings") {
+      renderSettings();
+      return;
+    }
+    const toggle = document.querySelector(".game-motion-toggle");
+    if (!state.motionAvailable) toggle?.remove();
+    else if (toggle) {
+      toggle.classList.toggle("active", state.motionEnabled);
+      toggle.innerHTML = `<b>Motion Controls: ${state.motionEnabled ? "On" : "Off"}</b><span>Switch between frames</span>`;
+    }
+    const zone = document.querySelector(".delivery-note");
+    if (zone) {
+      zone.innerHTML = `<i>↟</i><span><b>3 · ${state.motionEnabled ? "SWING THE PHONE" : "SWIPE ON THE LANE"}</b><small>${state.motionEnabled ? "Hold the lane · swing · release" : "Pull back · drive forward · curve to hook"}</small></span>`;
+    }
+    updateThrowInstruction(state.motionEnabled ? "HOLD · SWING · RELEASE" : "PULL BACK · SWIPE FORWARD");
   }
 
   function handleKeyboard(event) {
     if (state.screen !== "game") return;
     if (["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
-    if (event.code === "Space") {
-      event.preventDefault();
-      rollBall();
-    }
     if (event.key.toLowerCase() === "a") activate("board-left", document.body);
     if (event.key.toLowerCase() === "d") activate("board-right", document.body);
     if (event.key === "ArrowLeft") activate("aim-left", document.body);
@@ -721,11 +979,12 @@ function sanitizeRoomCode(code) {
   return code.toUpperCase().replace(/[^A-HJ-KM-NP-Z2-9]/g, "").slice(0, 6);
 }
 
-function controllerLink(code) {
+function controllerLink(code, purpose = state.roomPurpose || "motion") {
   const url = new URL(window.location.href);
   url.search = "";
   url.hash = "";
   url.searchParams.set("controller", code);
+  url.searchParams.set("mode", purpose);
   return url.toString();
 }
 
@@ -748,102 +1007,153 @@ async function shareControllerLink() {
   }
 }
 
-function createRoomTransport(code, role, onMessage = () => {}) {
+function isLikelyPhoneWithMotionApis() {
+  return matchMedia("(pointer: coarse)").matches && typeof DeviceMotionEvent !== "undefined" && typeof DeviceOrientationEvent !== "undefined";
+}
+
+let motionSensorsVerified = false;
+
+async function requestRequiredMotionSensors(timeoutMs = 1800) {
+  if (motionSensorsVerified) return true;
+  if (typeof DeviceMotionEvent === "undefined" || typeof DeviceOrientationEvent === "undefined") return false;
+  try {
+    if (typeof DeviceMotionEvent.requestPermission === "function" && await DeviceMotionEvent.requestPermission() !== "granted") return false;
+    if (typeof DeviceOrientationEvent.requestPermission === "function" && await DeviceOrientationEvent.requestPermission() !== "granted") return false;
+  } catch {
+    return false;
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      window.removeEventListener("devicemotion", inspect);
+      motionSensorsVerified = value;
+      resolve(value);
+    };
+    const inspect = (event) => {
+      const acceleration = event.accelerationIncludingGravity || event.acceleration;
+      const rotation = event.rotationRate;
+      const hasAcceleration = acceleration && [acceleration.x, acceleration.y, acceleration.z].some(Number.isFinite);
+      const hasGyroscope = rotation && [rotation.alpha, rotation.beta, rotation.gamma].some(Number.isFinite);
+      if (hasAcceleration && hasGyroscope) finish(true);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    window.addEventListener("devicemotion", inspect, { passive: true });
+  });
+}
+
+function makeControllerId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return `phone-${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function createRoomTransport(code, role, onMessage = () => {}, participantId = role === "host" ? "host" : makeControllerId()) {
   const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel(`sport-bowling-${code}`) : null;
   let socket = null;
   let socketReady = false;
   let closed = false;
-  let peer = null;
-  let dataChannel = null;
-  let localInputReady = false;
-  let broadcastReady = false;
-  const pendingCandidates = [];
+  const peers = new Map();
+  const broadcastReady = new Set();
+  const pendingSocketMessages = [];
 
-  const sendSignal = (type, value) => {
-    if (!socketReady) return;
-    socket.send(JSON.stringify({ type, signal: JSON.stringify(value) }));
+  const sendSocket = (payload) => {
+    if (socketReady) socket.send(JSON.stringify(payload));
+    else pendingSocketMessages.push(payload);
   };
 
-  const attachDataChannel = (nextChannel) => {
-    dataChannel = nextChannel;
-    dataChannel.addEventListener("open", () => {
-      localInputReady = true;
-      onMessage({ type: "local-input-ready", transport: "peer" });
+  const sendSignal = (type, value, targetControllerId) => {
+    sendSocket({ type, signal: JSON.stringify(value), controllerId: participantId, targetControllerId });
+  };
+
+  const attachDataChannel = (entry, nextChannel, controllerId) => {
+    entry.channel = nextChannel;
+    nextChannel.addEventListener("open", () => {
+      entry.ready = true;
+      onMessage({ type: "local-input-ready", transport: "peer", controllerId });
     });
-    dataChannel.addEventListener("close", () => {
-      localInputReady = false;
-      onMessage({ type: "local-input-closed" });
+    nextChannel.addEventListener("close", () => {
+      entry.ready = false;
+      onMessage({ type: "local-input-closed", controllerId });
     });
-    dataChannel.addEventListener("message", (event) => {
-      try { onMessage(JSON.parse(event.data)); } catch { /* ignore malformed local input */ }
+    nextChannel.addEventListener("message", (event) => {
+      try { onMessage({ ...JSON.parse(event.data), transport: "peer" }); } catch { /* ignore malformed local input */ }
     });
   };
 
-  const ensurePeer = () => {
-    if (peer || typeof RTCPeerConnection === "undefined") return peer;
-    peer = new RTCPeerConnection({ iceServers: [] });
+  const ensurePeer = (controllerId) => {
+    const key = role === "host" ? controllerId : "host";
+    if (peers.has(key) || typeof RTCPeerConnection === "undefined") return peers.get(key);
+    const peer = new RTCPeerConnection({ iceServers: [] });
+    const entry = { peer, channel: null, ready: false, pendingCandidates: [], controllerId };
+    peers.set(key, entry);
     peer.addEventListener("icecandidate", (event) => {
-      if (event.candidate) sendSignal("rtc-candidate", event.candidate.toJSON());
+      if (event.candidate) sendSignal("rtc-candidate", event.candidate.toJSON(), role === "host" ? controllerId : "host");
     });
     peer.addEventListener("connectionstatechange", () => {
       if (["failed", "disconnected", "closed"].includes(peer.connectionState)) {
-        localInputReady = false;
-        onMessage({ type: "local-input-closed" });
+        entry.ready = false;
+        onMessage({ type: "local-input-closed", controllerId });
       }
     });
-    if (role === "controller") peer.addEventListener("datachannel", (event) => attachDataChannel(event.channel));
-    return peer;
+    if (role === "controller") peer.addEventListener("datachannel", (event) => attachDataChannel(entry, event.channel, participantId));
+    return entry;
   };
 
-  const flushCandidates = async () => {
-    if (!peer?.remoteDescription) return;
-    while (pendingCandidates.length) {
-      try { await peer.addIceCandidate(pendingCandidates.shift()); } catch { /* stale candidate */ }
+  const flushCandidates = async (entry) => {
+    if (!entry?.peer.remoteDescription) return;
+    while (entry.pendingCandidates.length) {
+      try { await entry.peer.addIceCandidate(entry.pendingCandidates.shift()); } catch { /* stale candidate */ }
     }
   };
 
-  const beginLocalLink = async () => {
-    if (role !== "host" || dataChannel) return;
-    const connection = ensurePeer();
-    if (!connection) return;
-    attachDataChannel(connection.createDataChannel("bowling-input", { ordered: false, maxRetransmits: 0 }));
-    const offer = await connection.createOffer();
-    await connection.setLocalDescription(offer);
-    sendSignal("rtc-offer", connection.localDescription);
+  const beginLocalLink = async (controllerId) => {
+    if (role !== "host" || !controllerId) return;
+    const entry = ensurePeer(controllerId);
+    if (!entry || entry.channel) return;
+    attachDataChannel(entry, entry.peer.createDataChannel("bowling-input", { ordered: false, maxRetransmits: 0 }), controllerId);
+    const offer = await entry.peer.createOffer();
+    await entry.peer.setLocalDescription(offer);
+    sendSignal("rtc-offer", entry.peer.localDescription, controllerId);
   };
 
   const handleSocketMessage = async (message) => {
+    if (message.targetControllerId && role === "controller" && message.targetControllerId !== participantId) return;
     onMessage(message);
-    if (message.type === "controller-ready" && role === "host") await beginLocalLink();
-    if (message.type === "rtc-offer" && role === "controller") {
-      const connection = ensurePeer();
-      if (!connection) return;
-      await connection.setRemoteDescription(JSON.parse(message.signal));
-      const answer = await connection.createAnswer();
-      await connection.setLocalDescription(answer);
-      sendSignal("rtc-answer", connection.localDescription);
-      await flushCandidates();
+    if (message.type === "controller-ready" && role === "host") await beginLocalLink(message.controllerId);
+    if (message.type === "rtc-offer" && role === "controller" && message.targetControllerId === participantId) {
+      const entry = ensurePeer(participantId);
+      if (!entry) return;
+      await entry.peer.setRemoteDescription(JSON.parse(message.signal));
+      const answer = await entry.peer.createAnswer();
+      await entry.peer.setLocalDescription(answer);
+      sendSignal("rtc-answer", entry.peer.localDescription, "host");
+      await flushCandidates(entry);
     }
-    if (message.type === "rtc-answer" && role === "host" && peer) {
-      await peer.setRemoteDescription(JSON.parse(message.signal));
-      await flushCandidates();
+    if (message.type === "rtc-answer" && role === "host") {
+      const entry = peers.get(message.controllerId);
+      if (!entry) return;
+      await entry.peer.setRemoteDescription(JSON.parse(message.signal));
+      await flushCandidates(entry);
     }
     if (message.type === "rtc-candidate") {
       const candidate = JSON.parse(message.signal);
-      const connection = ensurePeer();
-      if (!connection?.remoteDescription) pendingCandidates.push(candidate);
-      else await connection.addIceCandidate(candidate);
+      const entry = role === "host" ? ensurePeer(message.controllerId) : ensurePeer(participantId);
+      if (!entry?.peer.remoteDescription) entry?.pendingCandidates.push(candidate);
+      else await entry.peer.addIceCandidate(candidate);
     }
   };
 
   channel?.addEventListener("message", (event) => {
+    if (event.data?.targetControllerId && role === "controller" && event.data.targetControllerId !== participantId) return;
     const counterpartReady =
       (role === "host" && event.data?.type === "controller-ready") ||
       (role === "controller" && event.data?.type === "host-ready");
     if (counterpartReady) {
-      broadcastReady = true;
+      broadcastReady.add(role === "host" ? event.data.controllerId : "host");
       if (role === "host" && event.data?.type === "controller-ready") {
-        channel.postMessage({ type: "host-ready", role });
+        channel.postMessage({ type: "host-ready", role, targetControllerId: event.data.controllerId });
       }
     }
     onMessage({ ...event.data, transport: "same-device" });
@@ -853,9 +1163,10 @@ function createRoomTransport(code, role, onMessage = () => {}) {
     socket = new WebSocket(`${protocol}//${location.host}/api/rooms/${code}?role=${role}`);
     socket.addEventListener("open", () => {
       socketReady = true;
-      const ready = { type: role === "controller" ? "controller-ready" : "host-ready", role };
+      const ready = { type: role === "controller" ? "controller-ready" : "host-ready", role, controllerId: participantId };
       socket.send(JSON.stringify(ready));
       channel?.postMessage(ready);
+      while (pendingSocketMessages.length) socket.send(JSON.stringify(pendingSocketMessages.shift()));
       onMessage({ type: "connected", transport: "signaling" });
     });
     socket.addEventListener("message", (event) => {
@@ -869,143 +1180,159 @@ function createRoomTransport(code, role, onMessage = () => {}) {
 
   return {
     send(message) {
-      const payload = { ...message, role, at: Date.now() };
+      const payload = { ...message, role, controllerId: role === "controller" ? participantId : message.controllerId, at: Date.now() };
       channel?.postMessage(payload);
       const isLocalMessage = message.type === "swing" || message.type === "pin-contact";
-      if (isLocalMessage && localInputReady) dataChannel.send(JSON.stringify(payload));
-      if (!isLocalMessage && socketReady) socket.send(JSON.stringify(payload));
-      onMessage(payload);
-      return !isLocalMessage || localInputReady || broadcastReady;
+      let delivered = false;
+      if (isLocalMessage) {
+        if (role === "controller") {
+          const entry = peers.get("host");
+          if (entry?.ready) { entry.channel.send(JSON.stringify(payload)); delivered = true; }
+        } else {
+          for (const [controllerId, entry] of peers) {
+            if (message.targetControllerId && message.targetControllerId !== controllerId) continue;
+            if (entry.ready) { entry.channel.send(JSON.stringify(payload)); delivered = true; }
+          }
+        }
+      } else {
+        sendSocket(payload);
+        delivered = true;
+      }
+      return delivered || broadcastReady.size > 0;
     },
     close() {
       closed = true;
       channel?.close();
-      dataChannel?.close();
-      peer?.close();
+      for (const entry of peers.values()) {
+        entry.channel?.close();
+        entry.peer?.close();
+      }
       socket?.close();
     },
     get closed() { return closed; },
-    get localInputReady() { return localInputReady; },
+    get localInputReady() { return [...peers.values()].some((entry) => entry.ready) || broadcastReady.size > 0; },
+    participantId,
   };
 }
 
-function renderPhoneController(code) {
+function renderPhoneController(code, requestedMode = "motion") {
   document.body.classList.add("controller-body");
   app.innerHTML = `
-    <section class="phone-controller">
-      <header><span class="zone-mark"><i>SB</i><b>ROOM ${code}</b></span><span class="connection-pill" id="controller-connection"><i></i> CONNECTING</span></header>
+    <section class="phone-controller pairing-gate">
+      <header><span class="zone-mark"><i>SB</i><b>ROOM ${code}</b></span></header>
       <main>
-        <span class="eyebrow">PHONE CONTROLLER</span><h1>HOLD · SWING<br><em>RELEASE.</em></h1><p>Once armed, keep your eyes on the big screen. Release your thumb at the bottom of the swing.</p>
-        <button class="enable-motion" id="enable-motion"><b>ENABLE MOTION + GYRO</b><small>One-time permission on this phone</small></button>
-        <button class="controller-hold-zone" id="hold-swing" aria-describedby="controller-status">
-          <i aria-hidden="true">●</i><b>HOLD HERE</b><span>SWING · RELEASE</span><small>NO SENSOR? PULL BACK AND FLICK</small>
-        </button>
+        <span class="eyebrow">MOTION CONTROLLER</span><h1>GYROSCOPE<br><em>REQUIRED.</em></h1><p>The accelerometer measures your swing. The gyroscope measures wrist rotation and hook. Both must be present before this phone can pair.</p>
+        <button class="enable-motion" id="verify-motion"><b>CHECK GYROSCOPE & PAIR</b><small>Required for TV Mode and Family Mode</small></button>
+        <div class="sensor-requirements"><span><b>ACCELEROMETER</b><small>Swing speed and direction</small></span><span><b>GYROSCOPE</b><small>Wrist rotation and hook</small></span></div>
       </main>
-      <footer><div class="safety-note"><b>!</b><span>Keep a firm grip, clear the space around you, and never release the phone.</span></div><small id="controller-status" aria-live="polite">Touch flick is ready.</small></footer>
+      <footer><small id="controller-status" aria-live="polite">Pairing has not started.</small></footer>
     </section>`;
 
-  const transport = createRoomTransport(code, "controller", (message) => {
-    if (message.type === "connected" || message.type === "host-ready") {
-      const pill = document.querySelector("#controller-connection");
-      if (pill) pill.innerHTML = "<i></i> CONNECTED";
-    }
-    if (message.type === "local-input-ready") {
-      const pill = document.querySelector("#controller-connection");
-      if (pill) pill.innerHTML = "<i></i> LOCAL LINK";
-      if (status) status.textContent = "Direct link ready. Hold, swing, and release.";
-    }
-    if (message.type === "local-input-closed" && status) status.textContent = "Local link paused. Keep both devices on the same Wi-Fi.";
-    if (message.type === "pin-contact") navigator.vibrate?.(45);
-  });
-  transport.send({ type: "controller-ready" });
-
-  const holdZone = document.querySelector("#hold-swing");
-  const status = document.querySelector("#controller-status");
-  let lastSwing = 0;
-  let motionReady = false;
-  let armed = false;
-  let peakAcceleration = 0;
-  let peakRotation = 0;
-  let gesturePath = null;
-
-  const sendSwing = ({ speed, rotation }) => {
-    if (Date.now() - lastSwing < 850) return;
-    lastSwing = Date.now();
-    const delivered = transport.send({
-      type: "swing",
-      position: 20,
-      angle: 20,
-      speed: clamp(speed, 0.25, 1),
-      rotation: clamp(rotation, -1, 1),
-      releasedAt: Date.now(),
-    });
-    if (!delivered) {
-      if (status) status.textContent = "Local link is still connecting. Try again in a moment.";
+  document.querySelector("#verify-motion")?.addEventListener("click", async () => {
+    const button = document.querySelector("#verify-motion");
+    const status = document.querySelector("#controller-status");
+    button.disabled = true;
+    button.innerHTML = "<b>CHECKING SENSORS…</b><small>Move the phone gently</small>";
+    const verified = await requestRequiredMotionSensors();
+    if (!verified) {
+      app.innerHTML = `<section class="phone-controller pairing-refused"><main><span class="eyebrow">PAIRING REFUSED</span><h1>GYROSCOPE<br><em>NOT FOUND.</em></h1><p>This phone cannot measure wrist rotation, so it cannot produce hook. TV Mode and Family Mode require a phone with both a gyroscope and accelerometer.</p><a href="${window.location.pathname}">BACK TO SPORT BOWLING</a></main></section>`;
       return;
     }
-    navigator.vibrate?.(28);
-    holdZone?.classList.add("released");
-    setTimeout(() => holdZone?.classList.remove("released"), 320);
-    if (status) status.textContent = "Roll sent. Watch the pins!";
+    if (status) status.textContent = "Sensors verified. Connecting to the big screen.";
+    startVerifiedController(code, requestedMode);
+  });
+}
+
+function startVerifiedController(code, requestedMode) {
+  const controllerId = makeControllerId();
+  let transport;
+  let paired = false;
+  let armed = false;
+  let lastSwing = 0;
+  let peakAcceleration = 0;
+  let peakRotation = 0;
+  let lateralAcceleration = 0;
+  let remotePosition = 20;
+  let remoteAngle = 20;
+  const deviceName = navigator.userAgentData?.platform ? `${navigator.userAgentData.platform} phone` : "Motion phone";
+
+  app.innerHTML = `<section class="phone-motion-pad"><button id="hold-swing" class="controller-hold-zone" aria-describedby="controller-status"><i aria-hidden="true">●</i><b>HOLD HERE</b><span>SWING · RELEASE</span><small id="pad-state">PAIRING WITH ROOM ${code}</small></button><span id="controller-status" class="sr-only" aria-live="polite">Pairing with the big screen.</span></section>`;
+  const holdZone = document.querySelector("#hold-swing");
+  const status = document.querySelector("#controller-status");
+  const padState = document.querySelector("#pad-state");
+
+  const setPadState = (message) => {
+    if (status) status.textContent = message;
+    if (padState) padState.textContent = message;
   };
 
   const onMotion = (event) => {
     if (!armed) return;
-    const accel = event.accelerationIncludingGravity || event.acceleration;
-    if (!accel) return;
-    const magnitude = Math.hypot(accel.x || 0, accel.y || 0, accel.z || 0);
-    const rotationRate = event.rotationRate || {};
+    const acceleration = event.accelerationIncludingGravity || event.acceleration;
+    const rotation = event.rotationRate;
+    if (!acceleration || !rotation) return;
+    const magnitude = Math.hypot(acceleration.x || 0, acceleration.y || 0, acceleration.z || 0);
     peakAcceleration = Math.max(peakAcceleration, magnitude);
-    peakRotation = Math.abs(rotationRate.gamma || 0) > Math.abs(peakRotation) ? rotationRate.gamma || 0 : peakRotation;
+    if (Math.abs(rotation.gamma || 0) > Math.abs(peakRotation)) peakRotation = rotation.gamma || 0;
+    if (Math.abs(acceleration.x || 0) > Math.abs(lateralAcceleration)) lateralAcceleration = acceleration.x || 0;
   };
+  window.addEventListener("devicemotion", onMotion, { passive: true });
 
-  document.querySelector("#enable-motion")?.addEventListener("click", async () => {
-    try {
-      if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
-        const permission = await DeviceMotionEvent.requestPermission();
-        if (permission !== "granted") throw new Error("Motion permission denied");
-      }
-      window.addEventListener("devicemotion", onMotion, { passive: true });
-      motionReady = true;
-      const enable = document.querySelector("#enable-motion");
-      enable.innerHTML = "<b>MOTION + GYRO READY ✓</b><small>Use the large hold area below</small>";
-      enable.disabled = true;
-      if (status) status.textContent = "Ready. Hold the large area, swing, then release.";
-    } catch {
-      motionReady = false;
-      if (status) status.textContent = "Motion unavailable. Pull back and flick in the large area.";
+  transport = createRoomTransport(code, "controller", (message) => {
+    if (message.targetControllerId && message.targetControllerId !== controllerId) return;
+    if (message.type === "connected" || message.type === "host-ready" || message.type === "local-input-ready") {
+      transport.send({ type: "pair-request", controllerId, deviceName, gyro: true, requestedMode });
+      setPadState("WAITING FOR BIG SCREEN");
     }
-  });
+    if (message.type === "pair-accepted") {
+      paired = true;
+      setPadState("READY · LOOK AT THE BIG SCREEN");
+      navigator.vibrate?.(25);
+    }
+    if (message.type === "aim-state" || message.type === "turn-state") {
+      remotePosition = clamp(Number(message.position) || remotePosition, 1, 39);
+      remoteAngle = clamp(Number(message.angle) || remoteAngle, 1, 39);
+    }
+    if (message.type === "assignment") setPadState(message.player === -1 ? "SHARED PHONE · READY" : `ASSIGNED TO PLAYER ${Number(message.player) + 1}`);
+    if (message.type === "turn-denied") setPadState(`PLAYER ${Number(message.player) + 1}'S TURN`);
+    if (message.type === "local-input-closed") setPadState("LOCAL LINK PAUSED");
+    if (message.type === "pin-contact") navigator.vibrate?.(45);
+  }, controllerId);
+  transport.send({ type: "pair-request", controllerId, deviceName, gyro: true, requestedMode });
 
   holdZone?.addEventListener("pointerdown", (event) => {
+    if (!paired) {
+      setPadState("WAITING FOR BIG SCREEN");
+      return;
+    }
     armed = true;
     peakAcceleration = 0;
     peakRotation = 0;
-    gesturePath = [{ x: event.clientX, y: event.clientY, at: performance.now() }];
+    lateralAcceleration = 0;
     holdZone.setPointerCapture?.(event.pointerId);
     holdZone.classList.add("holding");
-    if (status) status.textContent = motionReady ? "Armed. Look at the big screen and swing." : "Pull back, then flick forward and release.";
+    setPadState("ARMED · SWING NOW");
   });
 
-  holdZone?.addEventListener("pointermove", (event) => {
-    if (!gesturePath) return;
-    gesturePath.push({ x: event.clientX, y: event.clientY, at: performance.now() });
-  });
-
-  holdZone?.addEventListener("pointerup", (event) => {
-    if (!armed || !gesturePath) return;
-    gesturePath.push({ x: event.clientX, y: event.clientY, at: performance.now() });
-    holdZone.classList.remove("holding");
-    const input = motionReady
-      ? motionThrow({ peakAcceleration, peakRotation, assist: true })
-      : throwFromPointerPath(gesturePath, { width: holdZone.clientWidth, height: holdZone.clientHeight, assist: true });
+  holdZone?.addEventListener("pointerup", () => {
+    if (!armed || Date.now() - lastSwing < 700) return;
     armed = false;
-    gesturePath = null;
+    holdZone.classList.remove("holding");
+    const input = motionThrow({ peakAcceleration, peakRotation, lateralAcceleration, position: remotePosition, angle: remoteAngle });
     if (!input) {
-      if (status) status.textContent = "Pull back, then flick forward a little farther.";
+      setPadState("SWING NEEDED · TRY AGAIN");
       return;
     }
-    sendSwing(input);
+    lastSwing = Date.now();
+    const delivered = transport.send({ type: "swing", ...input, releasedAt: Date.now() });
+    if (!delivered) {
+      setPadState("LOCAL LINK NOT READY");
+      return;
+    }
+    navigator.vibrate?.(28);
+    holdZone.classList.add("released");
+    setTimeout(() => holdZone.classList.remove("released"), 260);
+    setPadState("RELEASED · WATCH THE PINS");
   });
 }
 

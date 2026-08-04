@@ -50,6 +50,8 @@ export class BowlingRoom {
     try {
       const parsed = JSON.parse(message);
       const attachment = socket.deserializeAttachment() ?? {};
+      const controllerId = safeToken(parsed.controllerId, 40) || attachment.controllerId || "";
+      if (controllerId && controllerId !== attachment.controllerId) socket.serializeAttachment({ ...attachment, controllerId });
       const safeMessage = {
         type: String(parsed.type ?? "message").slice(0, 32),
         position: numberBetween(parsed.position, 1, 39),
@@ -58,6 +60,13 @@ export class BowlingRoom {
         rotation: numberBetween(parsed.rotation ?? parsed.spin, -1, 1),
         releasedAt: numberBetween(parsed.releasedAt, 0, Number.MAX_SAFE_INTEGER),
         signal: typeof parsed.signal === "string" ? parsed.signal.slice(0, 16000) : "",
+        controllerId,
+        targetControllerId: safeToken(parsed.targetControllerId, 40),
+        deviceName: typeof parsed.deviceName === "string" ? parsed.deviceName.slice(0, 48) : "",
+        requestedMode: ["tv", "family", "motion"].includes(parsed.requestedMode) ? parsed.requestedMode : "motion",
+        purpose: ["tv", "family", ""].includes(parsed.purpose) ? parsed.purpose : "",
+        player: numberBetween(parsed.player, -1, 7),
+        gyro: parsed.gyro === true,
         role: attachment.role ?? "guest",
         at: Date.now(),
       };
@@ -68,8 +77,8 @@ export class BowlingRoom {
   }
 
   webSocketClose(socket) {
-    const role = socket.deserializeAttachment()?.role ?? "guest";
-    this.broadcast({ type: "disconnected", role }, socket);
+    const attachment = socket.deserializeAttachment() ?? {};
+    this.broadcast({ type: "disconnected", role: attachment.role ?? "guest", controllerId: attachment.controllerId ?? "" }, socket);
   }
 
   webSocketError(socket) {
@@ -88,4 +97,8 @@ export class BowlingRoom {
 function numberBetween(value, min, max) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : 0;
+}
+
+function safeToken(value, maxLength) {
+  return typeof value === "string" ? value.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, maxLength) : "";
 }
