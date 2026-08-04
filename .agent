@@ -1,6 +1,6 @@
 # Sport Bowling agent brief
 
-Use `PRD-Sport-Bowling.md` as the product source of truth and `MVP-Scope.md` as the build-order guardrail.
+Use `PRD-Sport-Bowling.md` as the rules/product baseline and `MVP-Scope.md` as the build-order guardrail. `Art-Direction-and-Mechanics.md` version 2.0 overrides both documents for camera, rendering, controls, hook physics, oil-pattern scope, and Family Mode latency.
 
 ## Non-negotiables
 
@@ -11,10 +11,16 @@ Use `PRD-Sport-Bowling.md` as the product source of truth and `MVP-Scope.md` as 
 - Keep the path from launch to first roll to two taps or fewer.
 - Make Family Bowl the welcoming default: pass-and-play turns, optional smart bumpers, gentle-roll assistance, and encouraging language.
 - Keep the core action to aim and roll; advanced spin may enrich a roll but must never be required to have fun.
+- Never display a power meter, spin slider, or timing gauge. Position, angle, swing speed, and release rotation are the complete control model.
+- Use bright flat fills in the 3D scene: no gradients, reflections, texture maps, specular materials, dark pin pit, bloom, or volumetrics.
+- Keep the camera fixed while aiming. During a roll, use only the specified slight push-in, pin-impact cut, and return.
+- Treat lane friction as one tunable constant and gutters as physical geometry.
+- Phone release input must use a direct local peer path; the room server may signal the connection but must not relay swing input.
 - Avoid punitive failure states, complicated setup, and long waits between family turns.
 - Never encode state in color alone; pair color with labels, symbols, or shape.
 - Keep mobile controls inside safe areas and the lower third of portrait play.
 - The phone controller must always offer touch-swing fallback when motion permission or sensors are unavailable.
+- The phone controller must not require a player to look at it during a swing and must haptically acknowledge release and pin contact when supported.
 - Run `npm test` and `npm run build` before committing or deploying.
 - Verify desktop, portrait mobile, compact mobile, and phone-controller views before release.
 

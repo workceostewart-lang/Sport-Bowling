@@ -46,14 +46,18 @@ export class BowlingRoom {
   }
 
   webSocketMessage(socket, message) {
-    if (typeof message !== "string" || message.length > 2048) return;
+    if (typeof message !== "string" || message.length > 20000) return;
     try {
       const parsed = JSON.parse(message);
       const attachment = socket.deserializeAttachment() ?? {};
       const safeMessage = {
         type: String(parsed.type ?? "message").slice(0, 32),
-        power: numberBetween(parsed.power, 0, 1),
-        spin: numberBetween(parsed.spin, -1, 1),
+        position: numberBetween(parsed.position, 1, 39),
+        angle: numberBetween(parsed.angle, 1, 39),
+        speed: numberBetween(parsed.speed ?? parsed.power, 0.25, 1),
+        rotation: numberBetween(parsed.rotation ?? parsed.spin, -1, 1),
+        releasedAt: numberBetween(parsed.releasedAt, 0, Number.MAX_SAFE_INTEGER),
+        signal: typeof parsed.signal === "string" ? parsed.signal.slice(0, 16000) : "",
         role: attachment.role ?? "guest",
         at: Date.now(),
       };

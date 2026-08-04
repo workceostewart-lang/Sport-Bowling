@@ -1,6 +1,7 @@
 import "./styles.css";
 import { BowlingScene } from "./bowling-scene.js";
-import { BowlingGame } from "./scoring.js";
+import { BowlingGame, detectSplit } from "./scoring.js";
+import { clamp, motionThrow, throwFromPointerPath } from "./input.js";
 
 const app = document.querySelector("#app");
 const query = new URLSearchParams(window.location.search);
@@ -24,8 +25,8 @@ const state = {
   selectedBall: 3,
   board: 20,
   aim: 20,
-  spin: 0,
-  power: 0.72,
+  rotation: 0,
+  speed: 0.64,
   game: null,
   games: [],
   players: [],
@@ -34,6 +35,7 @@ const state = {
   playerCount: 2,
   roomCode: "",
   roomTransport: null,
+  lastInputLatencyMs: null,
   reducedEffects: matchMedia("(prefers-reduced-motion: reduce)").matches,
   assist: true,
   sound: true,
@@ -43,7 +45,10 @@ const state = {
 if (controllerCode) {
   renderPhoneController(controllerCode);
 } else {
-  const scene = new BowlingScene({ onRollComplete: handleRollComplete });
+  const scene = new BowlingScene({
+    onRollComplete: handleRollComplete,
+    onPinImpact: () => state.roomTransport?.send({ type: "pin-contact" }),
+  });
   window.__sportBowling = { scene, state };
   renderMenu();
   window.addEventListener("resize", () => scene.resize(), { passive: true });
@@ -68,35 +73,44 @@ if (controllerCode) {
       scene.setAim(state.aim);
       updateLiveControls();
     }
-    if (input.matches("[data-spin]")) {
-      state.spin = Number(input.value) / 100;
-      updateLiveControls();
-    }
   });
 
-  let pointerStart = null;
+  let pointerPath = null;
   app.addEventListener("pointerdown", (event) => {
-    const stage = event.target.closest(".lane-stage");
+    const stage = event.target.closest(".lane-stage, .throw-surface");
     if (!stage || state.screen !== "game" || scene.rolling) return;
-    pointerStart = { x: event.clientX, y: event.clientY, at: performance.now(), stage };
+    pointerPath = [{ x: event.clientX, y: event.clientY, at: performance.now() }];
+    pointerPath.stage = stage;
     stage.setPointerCapture?.(event.pointerId);
     stage.classList.add("is-dragging");
   });
 
+  app.addEventListener("pointermove", (event) => {
+    if (!pointerPath) return;
+    pointerPath.push({ x: event.clientX, y: event.clientY, at: performance.now() });
+    if (pointerPath.length > 32) pointerPath.splice(1, pointerPath.length - 32);
+  });
+
   app.addEventListener("pointerup", (event) => {
-    if (!pointerStart) return;
-    const { x, y, at, stage } = pointerStart;
-    pointerStart = null;
+    if (!pointerPath) return;
+    const stage = pointerPath.stage;
+    pointerPath.push({ x: event.clientX, y: event.clientY, at: performance.now() });
+    const input = throwFromPointerPath(pointerPath, {
+      width: stage.clientWidth,
+      height: stage.clientHeight,
+      assist: state.assist,
+    });
+    pointerPath = null;
     stage.classList.remove("is-dragging");
-    const dx = event.clientX - x;
-    const dy = y - event.clientY;
-    const distance = Math.hypot(dx, dy);
-    if (dy < 32 || distance < 42) return;
-    const height = Math.max(160, stage.clientHeight);
-    const duration = Math.max(130, performance.now() - at);
-    state.power = clamp((dy / height) * 1.45 + (520 / duration) * 0.18, 0.28, 1);
-    state.spin = clamp(dx / Math.max(180, stage.clientWidth) * 3.2, -1, 1);
+    if (!input) return;
+    state.speed = input.speed;
+    state.rotation = input.rotation;
     rollBall();
+  });
+
+  app.addEventListener("pointercancel", () => {
+    pointerPath?.stage?.classList.remove("is-dragging");
+    pointerPath = null;
   });
 
   function activate(action, target) {
@@ -154,7 +168,7 @@ if (controllerCode) {
         shareControllerLink();
         break;
       case "test-remote":
-        state.roomTransport?.send({ type: "swing", power: 0.74, spin: 0.16, source: "test" });
+        state.roomTransport?.send({ type: "swing", position: state.board, angle: state.aim, speed: 0.74, rotation: 0.16, source: "test" });
         setStatus("Test swing sent. Start the lane to use it.", "success");
         break;
       case "start-room-game":
@@ -349,25 +363,27 @@ if (controllerCode) {
 
         <div class="game-main">
           <aside id="player-rail-content" class="player-rail">${playerRailMarkup()}</aside>
-          <div id="lane-stage" class="lane-stage" aria-label="Bowling lane. Swipe upward to roll." tabindex="0">
+          <div id="lane-stage" class="lane-stage" aria-label="Bowling lane. Hold, pull back, then flick forward to roll. Curve the flick to hook." tabindex="0">
             <div id="lane-mount" class="lane-mount"></div>
             <div class="lane-readout top-left"><span>LANE 07</span><b>${useFamily ? "SMART BUMPERS ✓" : "HOUSE 40'"}</b></div>
             <div class="lane-readout top-right"><span>FRAME <b id="frame-readout">1</b></span><span>BALL <b id="ball-readout">1</b></span></div>
-            <div class="aim-reticle" aria-hidden="true"><i></i><span>BOARD <b id="aim-board">${state.aim}</b></span></div>
-            <div id="roll-callout" class="roll-callout"><b>${useFamily ? "ONE SWIPE TO ROLL" : "SWIPE UP TO ROLL"}</b><span>${useFamily ? "The lane helps with power and gutters" : "Length = power · curve = hook"}</span></div>
+            <div class="aim-reticle" aria-hidden="true"><i></i><span>AIM <b id="aim-board">${state.aim}</b></span></div>
+            <div id="roll-callout" class="roll-callout"><b>HOLD · PULL BACK · FLICK</b><span>${useFamily ? "Smart bumpers and gentle-roll help are on" : "Flick speed sets power · curve sets hook"}</span></div>
             <div id="result-callout" class="result-callout" aria-live="assertive"></div>
           </div>
         </div>
 
         <footer class="game-controls">
           <div class="control-cluster position-control">
-            <small>START POSITION</small>
+            <small>1 · POSITION</small>
             <div><button data-action="board-left" aria-label="Move left">−</button><b><span id="position-board">${state.board}</span><em>/39</em></b><button data-action="board-right" aria-label="Move right">+</button></div>
           </div>
-          <label class="control-slider"><small>AIM</small><input data-aim type="range" min="1" max="39" value="${state.aim}"><span><b id="aim-label">BOARD ${state.aim}</b><em>POCKET 17.5</em></span></label>
-          <button class="roll-button" data-action="roll"><i>↑</i><span><b>ROLL</b><small>${useFamily ? "One swipe · assisted" : "Swipe lane or press Space"}</small></span></button>
-          <label class="control-slider spin-slider"><small>HOOK</small><input data-spin type="range" min="-100" max="100" value="${state.spin * 100}"><span><b id="spin-label">STRAIGHT</b><em>Q / E</em></span></label>
-          <div class="power-meter"><small>POWER</small><div><i style="height:${Math.round(state.power * 100)}%"></i></div><b id="power-label">${Math.round(state.power * 100)}</b></div>
+          <div class="control-cluster angle-control">
+            <small>2 · ANGLE</small>
+            <div><button data-action="aim-left" aria-label="Turn aim left">↶</button><b id="aim-label">BOARD ${state.aim}</b><button data-action="aim-right" aria-label="Turn aim right">↷</button></div>
+          </div>
+          <button class="throw-surface roll-button" data-action="roll" aria-label="Throw. Hold, pull back, and flick forward. Tap or press Space for a gentle accessible roll."><i>↑</i><span><b>3 · THROW</b><small>Hold · pull back · flick forward</small></span></button>
+          <div class="physical-input-note"><b>NO METERS</b><span>Speed and hook come from your flick</span></div>
         </footer>
 
         <div class="pause-layer" role="dialog" aria-modal="true" aria-label="Game paused">
@@ -392,7 +408,7 @@ if (controllerCode) {
         <div class="multi-layout">
           <aside class="multi-intro">
             <span class="eyebrow">PLAY TOGETHER</span><h2>YOUR PHONE<br><em>IS THE BALL.</em></h2>
-            <p>Create a room on PC, open its controller link on a phone, and swing the phone like a Wii Remote. A touch-swing fallback is always available.</p>
+            <p>Create a room on the big screen, open its controller link on a phone, then hold, swing, and release. A touch-flick fallback is always available.</p>
             <div class="phone-remote-art" aria-hidden="true"><span class="signal signal-a"></span><span class="signal signal-b"></span><div><i>●</i><b>SWING</b><small>REMOTE</small></div></div>
             <ul><li><b>1</b>Create or join a room</li><li><b>2</b>Open the controller link on your phone</li><li><b>3</b>Hold tight and swing forward</li></ul>
           </aside>
@@ -429,13 +445,23 @@ if (controllerCode) {
         if (label) label.textContent = "MOTION REMOTE CONNECTED";
         setStatus("Phone connected — swing when the lane is ready.", "success");
       }
+      if (message.type === "local-input-ready") {
+        const label = document.querySelector("#remote-state");
+        if (label) label.textContent = "LOCAL INPUT READY";
+        setStatus("Direct local input is ready — no server round trip.", "success");
+      }
+      if (message.type === "local-input-closed") setStatus("Local input paused. Keep both devices on the same Wi-Fi.", "error");
       if (message.type === "swing") {
         if (state.screen !== "game") startGame(false, true);
-        setTimeout(() => {
-          state.power = clamp(Number(message.power) || 0.7, 0.25, 1);
-          state.spin = clamp(Number(message.spin) || 0, -1, 1);
-          rollBall();
-        }, 220);
+        state.lastInputLatencyMs = Number(message.releasedAt) > 0 ? Math.max(0, Date.now() - Number(message.releasedAt)) : null;
+        document.documentElement.dataset.inputLatency = state.lastInputLatencyMs === null ? "unknown" : String(state.lastInputLatencyMs);
+        state.board = clamp(Number(message.position) || state.board, 1, 39);
+        state.aim = clamp(Number(message.angle) || state.aim, 1, 39);
+        state.speed = clamp(Number(message.speed ?? message.power) || 0.64, 0.25, 1);
+        state.rotation = clamp(Number(message.rotation ?? message.spin) || 0, -1, 1);
+        scene.setPosition(state.board);
+        scene.setAim(state.aim);
+        rollBall();
       }
     });
   }
@@ -472,7 +498,7 @@ if (controllerCode) {
         ${subHeader("Settings", "menu", "DEVICE PREFERENCES")}
         <div class="settings-layout"><aside><span class="eyebrow">GAME SETTINGS</span><h2>MAKE THE LANE<br><em>YOURS.</em></h2><p>Preferences are saved on this device.</p></aside><div class="settings-list">
           ${settingRow("Trajectory assist", "Predicted path while you aim", state.assist, "toggle-assist")}
-          ${settingRow("Full effects", "Fire trail, glow, and strike bursts", !state.reducedEffects, "toggle-effects")}
+          ${settingRow("Full effects", "Flat fire ribbon and strike bursts", !state.reducedEffects, "toggle-effects")}
           ${settingRow("Sound", "Lane ambience, roll, and pin impact", state.sound, "toggle-sound")}
           <div class="setting-row"><span><b>Orientation</b><small>Follows your device; PC uses landscape</small></span><em>AUTO</em></div>
           <div class="setting-row"><span><b>Colorblind support</b><small>Labels and shapes always accompany color</small></span><em>ALWAYS ON</em></div>
@@ -486,17 +512,17 @@ if (controllerCode) {
     state.lastHelpSection = section;
     const sections = {
       basics: ["THE BASICS", "Ten frames. Ten pins. Roll twice unless your first ball is a strike. Knock down all ten across two balls for a spare.", ["X = strike", "/ = spare", "– = zero pins", "F = foul"]],
-      controls: ["ROLL THE BALL", "Position your feet, aim at a lane board, then swipe forward. Swipe length sets power; the ending curve sets hook.", ["PC: drag or press Space", "A / D moves your feet", "Arrow keys adjust aim", "Q / E changes hook"]],
+      controls: ["THREE SIMPLE STEPS", "Move left or right, turn toward a lane board, then hold, pull back, and flick forward. Flick speed sets power and the release curve sets hook — no meters to watch.", ["A / D moves your feet", "Arrow keys turn your aim", "Mouse or touch: hold and flick", "Space sends a gentle accessible roll"]],
       scoring: ["READ THE SCORE", "A strike earns 10 plus your next two balls. A spare earns 10 plus your next ball. In frame ten, a strike or spare earns bonus rolls.", ["Maximum score: 300", "Twelve strikes make perfect", "Pending bonuses show —", "Raw pinfall is never hidden"]],
       multiplayer: ["BOWL TOGETHER", "Create a room, share its six-character code, and start when everyone is ready. Guests join without an account.", ["2–8 bowlers", "Sprint or 10 frames", "Phone motion remote", "Instant rematch"]],
-      tips: ["FIND THE POCKET", "Right-handers aim between pins 1 and 3; left-handers between 1 and 2. A controlled entry angle carries more pins than raw speed.", ["Move your feet first", "Slow down for more hook", "Treat spares seriously", "Watch the oil transition"]],
+      tips: ["FIND THE POCKET", "Right-handers aim between pins 1 and 3; left-handers between 1 and 2. A controlled entry angle carries more pins than raw speed.", ["Move your feet first", "Use a smooth forward flick", "Curve only near release", "Treat spares seriously"]],
     };
     const [title, copy, bullets] = sections[section] ?? sections.basics;
     app.innerHTML = `
       <section class="sub-screen help-screen screen-enter">
         ${subHeader("How to Play", state.game ? "resume" : "menu", "ALWAYS ONE TAP AWAY")}
         <div class="help-layout"><nav aria-label="How to play sections">${Object.entries(sections).map(([key, value], index) => `<button data-action="help-section" data-section="${key}" class="${key === section ? "active" : ""}"><span>${String(index + 1).padStart(2, "0")}</span><b>${value[0]}</b><i>→</i></button>`).join("")}</nav>
-          <article><span class="eyebrow">${section.toUpperCase()}</span><h2>${title}</h2><p>${copy}</p><div class="help-points">${bullets.map((item, index) => `<div><b>${index + 1}</b><span>${item}</span></div>`).join("")}</div>${section === "controls" ? '<div class="swipe-demo"><i>●</i><span></span><b>SWIPE FORWARD</b></div>' : ""}<button class="primary-button" data-action="${state.game ? "resume" : "play"}">${state.game ? "BACK TO LANE" : "PLAY NOW"} <i>→</i></button></article></div>
+          <article><span class="eyebrow">${section.toUpperCase()}</span><h2>${title}</h2><p>${copy}</p><div class="help-points">${bullets.map((item, index) => `<div><b>${index + 1}</b><span>${item}</span></div>`).join("")}</div>${section === "controls" ? '<div class="swipe-demo"><i>●</i><span></span><b>PULL BACK · FLICK FORWARD</b></div>' : ""}<button class="primary-button" data-action="${state.game ? "resume" : "play"}">${state.game ? "BACK TO LANE" : "PLAY NOW"} <i>→</i></button></article></div>
       </section>`;
   }
 
@@ -505,7 +531,7 @@ if (controllerCode) {
     if (!layer) return;
     if (!state.multiplayer) scene.setPaused(true);
     const content = {
-      controls: ["ROLL THE BALL", "Swipe forward on the lane. Swipe length sets power; the ending curve sets hook. On PC, press Space to roll."],
+      controls: ["POSITION · ANGLE · THROW", "Move your start and angle with the labelled buttons. Then hold, pull back, and flick forward on the lane. Speed and release curve become power and hook automatically."],
       scoring: ["READ THE SCORE", "A strike adds your next two balls. A spare adds your next one. Bonus rolls happen in frame ten."],
       multiplayer: ["ROOM PLAY", "Your turn stays live while this help card is open. Close it when you are ready to bowl."],
     }[section] ?? ["THE BASICS", "Knock down ten pins in ten frames. Strikes and spares earn bonus pinfall."];
@@ -524,9 +550,9 @@ if (controllerCode) {
     if (state.screen !== "game" || scene.rolling || state.game?.complete) return;
     const family = state.familyMode && state.players.length > 1;
     const rolled = scene.roll({
-      power: family ? clamp(state.power, 0.48, 0.88) : state.power,
-      spin: family ? state.spin * 0.62 : state.spin,
-      aim: family ? Math.round(state.aim * 0.72 + 20 * 0.28) : state.aim,
+      speed: family ? clamp(state.speed, 0.46, 0.88) : state.speed,
+      rotation: family ? state.rotation * 0.62 : state.rotation,
+      angle: family ? Math.round(state.aim * 0.72 + 20 * 0.28) : state.aim,
     });
     if (!rolled) return;
     document.querySelector("#roll-callout")?.classList.add("hidden");
@@ -535,20 +561,21 @@ if (controllerCode) {
     updateLiveControls();
   }
 
-  function handleRollComplete({ knocked }) {
+  function handleRollComplete({ knocked, standingPins = [] }) {
     if (!state.game || state.screen !== "game") return;
     const frameBefore = state.game.frameIndex;
     const standingBefore = state.game.pinsStanding();
     const legalPins = Math.min(knocked, standingBefore);
     const isStrike = standingBefore === 10 && legalPins === 10;
     const isSpare = standingBefore < 10 && legalPins === standingBefore;
+    const isSplit = standingBefore === 10 && legalPins > 0 && legalPins < 10 && detectSplit(standingPins);
     state.game.roll(legalPins);
     const frameFinished = state.game.complete || state.game.frameIndex !== frameBefore;
     updateScoreboard();
     const result = document.querySelector("#result-callout");
-    const label = isStrike ? "STRIKE!" : isSpare ? "SPARE!" : legalPins === 0 ? "GUTTER" : `${legalPins} PIN${legalPins === 1 ? "" : "S"}`;
+    const label = isStrike ? "STRIKE!" : isSpare ? "SPARE!" : legalPins === 0 ? "GUTTER" : isSplit ? `${legalPins} PINS · SPLIT` : `${legalPins} PIN${legalPins === 1 ? "" : "S"}`;
     if (result) {
-      result.innerHTML = `<b>${label}</b><span>${isStrike ? "Perfect pocket. All ten down." : isSpare ? "Clean conversion. Frame closed." : legalPins === 0 ? "Keep the line inside the arrows." : "Read the leave. Set up your next ball."}</span>`;
+      result.innerHTML = `<b>${label}</b><span>${isStrike ? "Perfect pocket. All ten down." : isSpare ? "Clean conversion. Frame closed." : legalPins === 0 ? "Keep the line inside the arrows." : isSplit ? "A gap remains. Pick one pin and make a confident spare try." : "Read the leave. Set up your next ball."}</span>`;
       result.classList.add("show");
     }
 
@@ -655,10 +682,6 @@ if (controllerCode) {
     textContent("#position-board", state.board);
     textContent("#aim-board", state.aim);
     textContent("#aim-label", `BOARD ${state.aim}`);
-    textContent("#spin-label", Math.abs(state.spin) < 0.08 ? "STRAIGHT" : `${state.spin < 0 ? "LEFT" : "RIGHT"} ${Math.round(Math.abs(state.spin) * 100)}%`);
-    textContent("#power-label", Math.round(state.power * 100));
-    const fill = document.querySelector(".power-meter i");
-    if (fill) fill.style.height = `${Math.round(state.power * 100)}%`;
   }
 
   function handleKeyboard(event) {
@@ -672,8 +695,6 @@ if (controllerCode) {
     if (event.key.toLowerCase() === "d") activate("board-right", document.body);
     if (event.key === "ArrowLeft") activate("aim-left", document.body);
     if (event.key === "ArrowRight") activate("aim-right", document.body);
-    if (event.key.toLowerCase() === "q") state.spin = clamp(state.spin - 0.1, -1, 1);
-    if (event.key.toLowerCase() === "e") state.spin = clamp(state.spin + 0.1, -1, 1);
     updateLiveControls();
   }
 }
@@ -732,8 +753,101 @@ function createRoomTransport(code, role, onMessage = () => {}) {
   let socket = null;
   let socketReady = false;
   let closed = false;
+  let peer = null;
+  let dataChannel = null;
+  let localInputReady = false;
+  let broadcastReady = false;
+  const pendingCandidates = [];
 
-  channel?.addEventListener("message", (event) => onMessage(event.data));
+  const sendSignal = (type, value) => {
+    if (!socketReady) return;
+    socket.send(JSON.stringify({ type, signal: JSON.stringify(value) }));
+  };
+
+  const attachDataChannel = (nextChannel) => {
+    dataChannel = nextChannel;
+    dataChannel.addEventListener("open", () => {
+      localInputReady = true;
+      onMessage({ type: "local-input-ready", transport: "peer" });
+    });
+    dataChannel.addEventListener("close", () => {
+      localInputReady = false;
+      onMessage({ type: "local-input-closed" });
+    });
+    dataChannel.addEventListener("message", (event) => {
+      try { onMessage(JSON.parse(event.data)); } catch { /* ignore malformed local input */ }
+    });
+  };
+
+  const ensurePeer = () => {
+    if (peer || typeof RTCPeerConnection === "undefined") return peer;
+    peer = new RTCPeerConnection({ iceServers: [] });
+    peer.addEventListener("icecandidate", (event) => {
+      if (event.candidate) sendSignal("rtc-candidate", event.candidate.toJSON());
+    });
+    peer.addEventListener("connectionstatechange", () => {
+      if (["failed", "disconnected", "closed"].includes(peer.connectionState)) {
+        localInputReady = false;
+        onMessage({ type: "local-input-closed" });
+      }
+    });
+    if (role === "controller") peer.addEventListener("datachannel", (event) => attachDataChannel(event.channel));
+    return peer;
+  };
+
+  const flushCandidates = async () => {
+    if (!peer?.remoteDescription) return;
+    while (pendingCandidates.length) {
+      try { await peer.addIceCandidate(pendingCandidates.shift()); } catch { /* stale candidate */ }
+    }
+  };
+
+  const beginLocalLink = async () => {
+    if (role !== "host" || dataChannel) return;
+    const connection = ensurePeer();
+    if (!connection) return;
+    attachDataChannel(connection.createDataChannel("bowling-input", { ordered: false, maxRetransmits: 0 }));
+    const offer = await connection.createOffer();
+    await connection.setLocalDescription(offer);
+    sendSignal("rtc-offer", connection.localDescription);
+  };
+
+  const handleSocketMessage = async (message) => {
+    onMessage(message);
+    if (message.type === "controller-ready" && role === "host") await beginLocalLink();
+    if (message.type === "rtc-offer" && role === "controller") {
+      const connection = ensurePeer();
+      if (!connection) return;
+      await connection.setRemoteDescription(JSON.parse(message.signal));
+      const answer = await connection.createAnswer();
+      await connection.setLocalDescription(answer);
+      sendSignal("rtc-answer", connection.localDescription);
+      await flushCandidates();
+    }
+    if (message.type === "rtc-answer" && role === "host" && peer) {
+      await peer.setRemoteDescription(JSON.parse(message.signal));
+      await flushCandidates();
+    }
+    if (message.type === "rtc-candidate") {
+      const candidate = JSON.parse(message.signal);
+      const connection = ensurePeer();
+      if (!connection?.remoteDescription) pendingCandidates.push(candidate);
+      else await connection.addIceCandidate(candidate);
+    }
+  };
+
+  channel?.addEventListener("message", (event) => {
+    const counterpartReady =
+      (role === "host" && event.data?.type === "controller-ready") ||
+      (role === "controller" && event.data?.type === "host-ready");
+    if (counterpartReady) {
+      broadcastReady = true;
+      if (role === "host" && event.data?.type === "controller-ready") {
+        channel.postMessage({ type: "host-ready", role });
+      }
+    }
+    onMessage({ ...event.data, transport: "same-device" });
+  });
   try {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     socket = new WebSocket(`${protocol}//${location.host}/api/rooms/${code}?role=${role}`);
@@ -742,10 +856,10 @@ function createRoomTransport(code, role, onMessage = () => {}) {
       const ready = { type: role === "controller" ? "controller-ready" : "host-ready", role };
       socket.send(JSON.stringify(ready));
       channel?.postMessage(ready);
-      onMessage({ type: "connected", transport: "websocket" });
+      onMessage({ type: "connected", transport: "signaling" });
     });
     socket.addEventListener("message", (event) => {
-      try { onMessage(JSON.parse(event.data)); } catch { /* ignore malformed room messages */ }
+      try { handleSocketMessage(JSON.parse(event.data)).catch(() => {}); } catch { /* ignore malformed room messages */ }
     });
     socket.addEventListener("close", () => { socketReady = false; });
     socket.addEventListener("error", () => { socketReady = false; });
@@ -757,15 +871,21 @@ function createRoomTransport(code, role, onMessage = () => {}) {
     send(message) {
       const payload = { ...message, role, at: Date.now() };
       channel?.postMessage(payload);
-      if (socketReady) socket.send(JSON.stringify(payload));
+      const isLocalMessage = message.type === "swing" || message.type === "pin-contact";
+      if (isLocalMessage && localInputReady) dataChannel.send(JSON.stringify(payload));
+      if (!isLocalMessage && socketReady) socket.send(JSON.stringify(payload));
       onMessage(payload);
+      return !isLocalMessage || localInputReady || broadcastReady;
     },
     close() {
       closed = true;
       channel?.close();
+      dataChannel?.close();
+      peer?.close();
       socket?.close();
     },
     get closed() { return closed; },
+    get localInputReady() { return localInputReady; },
   };
 }
 
@@ -773,15 +893,15 @@ function renderPhoneController(code) {
   document.body.classList.add("controller-body");
   app.innerHTML = `
     <section class="phone-controller">
-      <header><span class="zone-mark"><i>SB</i><b>SPORT BOWLING</b></span><span class="connection-pill" id="controller-connection"><i></i> CONNECTING</span></header>
+      <header><span class="zone-mark"><i>SB</i><b>ROOM ${code}</b></span><span class="connection-pill" id="controller-connection"><i></i> CONNECTING</span></header>
       <main>
-        <span class="eyebrow">ROOM ${code}</span><h1>YOUR PHONE<br><em>IS THE BALL.</em></h1><p>Hold your phone firmly. Swing forward smoothly, then stop before your arm points at the floor.</p>
-        <div class="motion-ball" id="motion-ball" aria-hidden="true"><i></i><i></i><i></i><span></span></div>
-        <div class="motion-meter"><span>SOFT</span><div><i id="motion-fill"></i></div><span>POWER</span></div>
-        <button class="enable-motion" id="enable-motion"><b>ENABLE MOTION SWING</b><small>Uses this phone's motion sensor</small></button>
-        <div class="safety-note"><b>!</b><span>Keep a firm grip and clear the space around you. Never throw or release your phone.</span></div>
+        <span class="eyebrow">PHONE CONTROLLER</span><h1>HOLD · SWING<br><em>RELEASE.</em></h1><p>Once armed, keep your eyes on the big screen. Release your thumb at the bottom of the swing.</p>
+        <button class="enable-motion" id="enable-motion"><b>ENABLE MOTION + GYRO</b><small>One-time permission on this phone</small></button>
+        <button class="controller-hold-zone" id="hold-swing" aria-describedby="controller-status">
+          <i aria-hidden="true">●</i><b>HOLD HERE</b><span>SWING · RELEASE</span><small>NO SENSOR? PULL BACK AND FLICK</small>
+        </button>
       </main>
-      <footer><span>NO SENSOR?</span><button id="touch-swing">HOLD &amp; SWIPE UP TO ROLL ↑</button><small id="controller-status">Touch swing is ready.</small></footer>
+      <footer><div class="safety-note"><b>!</b><span>Keep a firm grip, clear the space around you, and never release the phone.</span></div><small id="controller-status" aria-live="polite">Touch flick is ready.</small></footer>
     </section>`;
 
   const transport = createRoomTransport(code, "controller", (message) => {
@@ -789,34 +909,54 @@ function renderPhoneController(code) {
       const pill = document.querySelector("#controller-connection");
       if (pill) pill.innerHTML = "<i></i> CONNECTED";
     }
+    if (message.type === "local-input-ready") {
+      const pill = document.querySelector("#controller-connection");
+      if (pill) pill.innerHTML = "<i></i> LOCAL LINK";
+      if (status) status.textContent = "Direct link ready. Hold, swing, and release.";
+    }
+    if (message.type === "local-input-closed" && status) status.textContent = "Local link paused. Keep both devices on the same Wi-Fi.";
+    if (message.type === "pin-contact") navigator.vibrate?.(45);
   });
   transport.send({ type: "controller-ready" });
 
-  const motionFill = document.querySelector("#motion-fill");
-  const motionBall = document.querySelector("#motion-ball");
+  const holdZone = document.querySelector("#hold-swing");
   const status = document.querySelector("#controller-status");
   let lastSwing = 0;
-  let peak = 0;
+  let motionReady = false;
+  let armed = false;
+  let peakAcceleration = 0;
+  let peakRotation = 0;
+  let gesturePath = null;
 
-  const sendSwing = (power, spin = 0) => {
-    if (Date.now() - lastSwing < 1200) return;
+  const sendSwing = ({ speed, rotation }) => {
+    if (Date.now() - lastSwing < 850) return;
     lastSwing = Date.now();
-    transport.send({ type: "swing", power: clamp(power, 0.28, 1), spin: clamp(spin, -1, 1) });
-    motionBall?.classList.add("thrown");
-    setTimeout(() => motionBall?.classList.remove("thrown"), 520);
-    if (status) status.textContent = `Roll sent · ${Math.round(power * 100)}% power`;
+    const delivered = transport.send({
+      type: "swing",
+      position: 20,
+      angle: 20,
+      speed: clamp(speed, 0.25, 1),
+      rotation: clamp(rotation, -1, 1),
+      releasedAt: Date.now(),
+    });
+    if (!delivered) {
+      if (status) status.textContent = "Local link is still connecting. Try again in a moment.";
+      return;
+    }
+    navigator.vibrate?.(28);
+    holdZone?.classList.add("released");
+    setTimeout(() => holdZone?.classList.remove("released"), 320);
+    if (status) status.textContent = "Roll sent. Watch the pins!";
   };
 
   const onMotion = (event) => {
+    if (!armed) return;
     const accel = event.accelerationIncludingGravity || event.acceleration;
     if (!accel) return;
     const magnitude = Math.hypot(accel.x || 0, accel.y || 0, accel.z || 0);
-    peak = Math.max(peak * 0.94, magnitude);
-    const level = clamp((peak - 9.8) / 17, 0, 1);
-    if (motionFill) motionFill.style.width = `${Math.round(level * 100)}%`;
-    if (magnitude > 21 && Date.now() - lastSwing > 1200) {
-      sendSwing(clamp((magnitude - 12) / 22, 0.35, 1), clamp((accel.x || 0) / 18, -1, 1));
-    }
+    const rotationRate = event.rotationRate || {};
+    peakAcceleration = Math.max(peakAcceleration, magnitude);
+    peakRotation = Math.abs(rotationRate.gamma || 0) > Math.abs(peakRotation) ? rotationRate.gamma || 0 : peakRotation;
   };
 
   document.querySelector("#enable-motion")?.addEventListener("click", async () => {
@@ -826,32 +966,46 @@ function renderPhoneController(code) {
         if (permission !== "granted") throw new Error("Motion permission denied");
       }
       window.addEventListener("devicemotion", onMotion, { passive: true });
-      document.querySelector("#enable-motion").innerHTML = "<b>MOTION READY ✓</b><small>Swing forward when the lane is ready</small>";
-      if (status) status.textContent = "Sensor calibrated. Keep a firm grip.";
+      motionReady = true;
+      const enable = document.querySelector("#enable-motion");
+      enable.innerHTML = "<b>MOTION + GYRO READY ✓</b><small>Use the large hold area below</small>";
+      enable.disabled = true;
+      if (status) status.textContent = "Ready. Hold the large area, swing, then release.";
     } catch {
-      if (status) status.textContent = "Motion unavailable. Use touch swing below.";
+      motionReady = false;
+      if (status) status.textContent = "Motion unavailable. Pull back and flick in the large area.";
     }
   });
 
-  const touch = document.querySelector("#touch-swing");
-  let start = null;
-  touch?.addEventListener("pointerdown", (event) => {
-    start = { x: event.clientX, y: event.clientY, at: performance.now() };
-    touch.setPointerCapture?.(event.pointerId);
-    touch.classList.add("holding");
+  holdZone?.addEventListener("pointerdown", (event) => {
+    armed = true;
+    peakAcceleration = 0;
+    peakRotation = 0;
+    gesturePath = [{ x: event.clientX, y: event.clientY, at: performance.now() }];
+    holdZone.setPointerCapture?.(event.pointerId);
+    holdZone.classList.add("holding");
+    if (status) status.textContent = motionReady ? "Armed. Look at the big screen and swing." : "Pull back, then flick forward and release.";
   });
-  touch?.addEventListener("pointerup", (event) => {
-    if (!start) return;
-    touch.classList.remove("holding");
-    const dy = start.y - event.clientY;
-    const dx = event.clientX - start.x;
-    const duration = performance.now() - start.at;
-    start = null;
-    if (dy < 30) {
-      if (status) status.textContent = "Swipe upward farther to roll.";
+
+  holdZone?.addEventListener("pointermove", (event) => {
+    if (!gesturePath) return;
+    gesturePath.push({ x: event.clientX, y: event.clientY, at: performance.now() });
+  });
+
+  holdZone?.addEventListener("pointerup", (event) => {
+    if (!armed || !gesturePath) return;
+    gesturePath.push({ x: event.clientX, y: event.clientY, at: performance.now() });
+    holdZone.classList.remove("holding");
+    const input = motionReady
+      ? motionThrow({ peakAcceleration, peakRotation, assist: true })
+      : throwFromPointerPath(gesturePath, { width: holdZone.clientWidth, height: holdZone.clientHeight, assist: true });
+    armed = false;
+    gesturePath = null;
+    if (!input) {
+      if (status) status.textContent = "Pull back, then flick forward a little farther.";
       return;
     }
-    sendSwing(clamp(dy / 220 + 300 / Math.max(180, duration) * 0.2, 0.3, 1), clamp(dx / 150, -1, 1));
+    sendSwing(input);
   });
 }
 
@@ -865,10 +1019,6 @@ function setStatus(message, type = "") {
 function textContent(selector, value) {
   const element = document.querySelector(selector);
   if (element) element.textContent = String(value);
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
 }
 
 function escapeHtml(value) {

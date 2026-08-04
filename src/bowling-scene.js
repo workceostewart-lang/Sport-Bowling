@@ -6,20 +6,24 @@ const HEAD_PIN_Z = -18.29;
 const BALL_RADIUS = 0.108;
 const PIN_SPACING = 0.3048;
 const FIXED_STEP = 1 / 120;
+const LANE_FRICTION = 0.055;
 
 const COLORS = {
-  black: 0x08080c,
+  black: 0x10120d,
   blue: 0x1b6cf2,
   gold: 0xd4af37,
   red: 0xd7263d,
   orange: 0xff7a1a,
   silver: 0xc7cdd3,
-  wood: 0xc8904d,
+  lane: 0xd9d64f,
+  gutter: 0xb5b744,
+  environment: 0xf2efb5,
 };
 
 export class BowlingScene {
-  constructor({ onRollComplete } = {}) {
+  constructor({ onRollComplete, onPinImpact } = {}) {
     this.onRollComplete = onRollComplete;
+    this.onPinImpact = onPinImpact;
     this.container = null;
     this.rolling = false;
     this.paused = false;
@@ -33,16 +37,18 @@ export class BowlingScene {
     this.aimBoard = 20;
     this.bumpersEnabled = false;
     this.bumperMeshes = [];
+    this.impactCameraTriggered = false;
+    this.cameraCutUntil = 0;
+    this.baseCameraPosition = new THREE.Vector3();
+    this.baseCameraTarget = new THREE.Vector3();
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(COLORS.black);
-    this.scene.fog = new THREE.FogExp2(COLORS.black, 0.035);
+    this.scene.background = new THREE.Color(COLORS.environment);
 
     this.camera = new THREE.PerspectiveCamera(46, 1, 0.05, 80);
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.toneMapping = THREE.NoToneMapping;
     this.renderer.domElement.className = "bowling-canvas";
     this.renderer.domElement.setAttribute("aria-label", "A regulation bowling lane with a blue ball and ten pins");
 
@@ -53,20 +59,25 @@ export class BowlingScene {
     this.ballMaterial = new CANNON.Material("ball");
     this.pinMaterial = new CANNON.Material("pin");
     this.world.addContactMaterial(new CANNON.ContactMaterial(this.ballMaterial, this.laneMaterial, {
-      friction: 0.055,
+      friction: LANE_FRICTION,
       restitution: 0.08,
     }));
     this.world.addContactMaterial(new CANNON.ContactMaterial(this.ballMaterial, this.pinMaterial, {
       friction: 0.2,
-      restitution: 0.34,
+      restitution: 0.44,
     }));
     this.world.addContactMaterial(new CANNON.ContactMaterial(this.pinMaterial, this.laneMaterial, {
       friction: 0.23,
-      restitution: 0.18,
+      restitution: 0.22,
+    }));
+    this.world.addContactMaterial(new CANNON.ContactMaterial(this.pinMaterial, this.pinMaterial, {
+      friction: 0.16,
+      restitution: 0.42,
     }));
 
     this.pinPairs = [];
-    this.trail = [];
+    this.trailPoints = Array.from({ length: 18 }, () => new THREE.Vector3());
+    this.trailRibbons = [];
     this.clockFrame = 0;
     this.buildEnvironment();
     this.createBall();
@@ -77,25 +88,12 @@ export class BowlingScene {
   }
 
   buildEnvironment() {
-    const hemi = new THREE.HemisphereLight(0xc8d8ff, 0x170d18, 2.2);
-    this.scene.add(hemi);
-
-    const deckLight = new THREE.SpotLight(0xffffff, 85, 38, Math.PI / 7, 0.55, 1.2);
-    deckLight.position.set(0, 6, -14);
-    deckLight.target.position.set(0, 0, HEAD_PIN_Z);
-    this.scene.add(deckLight, deckLight.target);
-
-    const rim = new THREE.PointLight(COLORS.blue, 28, 18, 1.5);
-    rim.position.set(-3, 2, -13);
-    this.scene.add(rim);
-    const warm = new THREE.PointLight(COLORS.orange, 20, 15, 1.5);
-    warm.position.set(2.5, 1.2, 1.5);
-    this.scene.add(warm);
+    this.scene.add(new THREE.AmbientLight(0xffffff, 3));
 
     const laneGeometry = new THREE.BoxGeometry(LANE_WIDTH, 0.12, 22.5);
     const laneMesh = new THREE.Mesh(
       laneGeometry,
-      new THREE.MeshStandardMaterial({ color: COLORS.wood, roughness: 0.34, metalness: 0.05 }),
+      new THREE.MeshBasicMaterial({ color: COLORS.lane }),
     );
     laneMesh.position.set(0, -0.06, -8.9);
     this.scene.add(laneMesh);
@@ -105,7 +103,7 @@ export class BowlingScene {
     laneBody.position.set(0, -0.06, -8.9);
     this.world.addBody(laneBody);
 
-    const boardMaterial = new THREE.MeshBasicMaterial({ color: 0xf2c57f, transparent: true, opacity: 0.34 });
+    const boardMaterial = new THREE.MeshBasicMaterial({ color: 0xb9b73e });
     for (let board = 1; board < 39; board += 1) {
       const x = -LANE_WIDTH / 2 + (LANE_WIDTH / 39) * board;
       const line = new THREE.Mesh(new THREE.BoxGeometry(0.0014, 0.002, 21.8), boardMaterial);
@@ -113,7 +111,7 @@ export class BowlingScene {
       this.scene.add(line);
     }
 
-    const gutterMaterial = new THREE.MeshStandardMaterial({ color: 0x1a1b21, metalness: 0.68, roughness: 0.25 });
+    const gutterMaterial = new THREE.MeshBasicMaterial({ color: COLORS.gutter });
     for (const side of [-1, 1]) {
       const gutter = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.08, 22.5), gutterMaterial);
       gutter.position.set(side * (LANE_WIDTH / 2 + 0.13), -0.1, -8.9);
@@ -122,15 +120,19 @@ export class BowlingScene {
       rail.position.set(side * (LANE_WIDTH / 2 + 0.28), -0.02, -8.9);
       this.scene.add(rail);
 
+      const gutterBody = new CANNON.Body({ mass: 0, material: this.laneMaterial });
+      gutterBody.addShape(new CANNON.Box(new CANNON.Vec3(0.125, 0.04, 11.25)));
+      gutterBody.position.set(side * (LANE_WIDTH / 2 + 0.13), -0.1, -8.9);
+      this.world.addBody(gutterBody);
+
+      const railBody = new CANNON.Body({ mass: 0, material: this.laneMaterial });
+      railBody.addShape(new CANNON.Box(new CANNON.Vec3(0.028, 0.18, 11.25)));
+      railBody.position.set(side * (LANE_WIDTH / 2 + 0.28), 0.05, -8.9);
+      this.world.addBody(railBody);
+
       const bumper = new THREE.Mesh(
         new THREE.BoxGeometry(0.035, 0.07, 18.4),
-        new THREE.MeshStandardMaterial({
-          color: 0x17b978,
-          emissive: 0x075734,
-          emissiveIntensity: 1.4,
-          metalness: 0.45,
-          roughness: 0.3,
-        }),
+        new THREE.MeshBasicMaterial({ color: 0x17b978 }),
       );
       bumper.position.set(side * (LANE_WIDTH / 2 - 0.012), 0.045, -9.05);
       bumper.visible = false;
@@ -141,17 +143,22 @@ export class BowlingScene {
 
     const backWall = new THREE.Mesh(
       new THREE.BoxGeometry(4.6, 3.5, 0.2),
-      new THREE.MeshStandardMaterial({ color: 0x11121a, roughness: 0.8 }),
+      new THREE.MeshBasicMaterial({ color: COLORS.environment }),
     );
     backWall.position.set(0, 1.4, -20.6);
     this.scene.add(backWall);
 
     const header = new THREE.Mesh(
       new THREE.BoxGeometry(2.8, 0.38, 0.12),
-      new THREE.MeshStandardMaterial({ color: COLORS.blue, emissive: 0x0d3270, emissiveIntensity: 1.2 }),
+      new THREE.MeshBasicMaterial({ color: 0xffd23f }),
     );
     header.position.set(0, 1.75, -20.45);
     this.scene.add(header);
+
+    const rearBody = new CANNON.Body({ mass: 0, material: this.laneMaterial });
+    rearBody.addShape(new CANNON.Box(new CANNON.Vec3(2.3, 1.75, 0.1)));
+    rearBody.position.copy(backWall.position);
+    this.world.addBody(rearBody);
 
     this.addLaneMarkers();
   }
@@ -181,14 +188,15 @@ export class BowlingScene {
     this.ballBody.addShape(new CANNON.Sphere(BALL_RADIUS));
     this.world.addBody(this.ballBody);
 
-    const ballMaterial = new THREE.MeshPhysicalMaterial({
-      color: COLORS.blue,
-      roughness: 0.18,
-      metalness: 0.28,
-      clearcoat: 1,
-      clearcoatRoughness: 0.09,
-    });
-    this.ballMesh = new THREE.Mesh(new THREE.SphereGeometry(BALL_RADIUS, 40, 24), ballMaterial);
+    const sphereGeometry = new THREE.SphereGeometry(BALL_RADIUS, 32, 20);
+    this.ballMesh = new THREE.Group();
+    const outline = new THREE.Mesh(
+      sphereGeometry,
+      new THREE.MeshBasicMaterial({ color: COLORS.black, side: THREE.BackSide }),
+    );
+    outline.scale.setScalar(1.075);
+    const fill = new THREE.Mesh(sphereGeometry, new THREE.MeshBasicMaterial({ color: COLORS.blue }));
+    this.ballMesh.add(outline, fill);
     this.scene.add(this.ballMesh);
 
     const holeMaterial = new THREE.MeshBasicMaterial({ color: 0x050509 });
@@ -199,19 +207,38 @@ export class BowlingScene {
       this.ballMesh.add(hole);
     }
 
-    const trailGeometry = new THREE.SphereGeometry(0.035, 8, 6);
-    for (let index = 0; index < 18; index += 1) {
-      const material = new THREE.MeshBasicMaterial({
-        color: index % 3 === 0 ? COLORS.gold : COLORS.orange,
-        transparent: true,
-        opacity: Math.max(0.04, 0.42 - index * 0.021),
-      });
-      const ember = new THREE.Mesh(trailGeometry, material);
-      ember.visible = false;
-      this.trail.push(ember);
-      this.scene.add(ember);
-    }
+    this.ballShadow = new THREE.Mesh(
+      new THREE.CircleGeometry(BALL_RADIUS * 1.08, 24),
+      new THREE.MeshBasicMaterial({ color: COLORS.black, transparent: true, opacity: 0.16, depthWrite: false }),
+    );
+    this.ballShadow.rotation.x = -Math.PI / 2;
+    this.ballShadow.position.y = 0.006;
+    this.scene.add(this.ballShadow);
+
+    this.trailRibbons.push(
+      this.createTrailRibbon(0.105, COLORS.black, 0.011),
+      this.createTrailRibbon(0.068, COLORS.orange, 0.014),
+      this.createTrailRibbon(0.028, 0xffd23f, 0.017),
+    );
     this.resetBall();
+  }
+
+  createTrailRibbon(width, color, y) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(this.trailPoints.length * 2 * 3), 3));
+    const indices = [];
+    for (let index = 0; index < this.trailPoints.length - 1; index += 1) {
+      const offset = index * 2;
+      indices.push(offset, offset + 2, offset + 1, offset + 1, offset + 2, offset + 3);
+    }
+    geometry.setIndex(indices);
+    const ribbon = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide }));
+    ribbon.userData.width = width;
+    ribbon.userData.y = y;
+    ribbon.visible = false;
+    ribbon.frustumCulled = false;
+    this.scene.add(ribbon);
+    return ribbon;
   }
 
   createRack() {
@@ -230,15 +257,21 @@ export class BowlingScene {
     for (const [index, point] of layout.entries()) {
       const body = this.createPinBody(point.x, point.z);
       const mesh = this.createPinMesh(index + 1);
+      const shadow = new THREE.Mesh(
+        new THREE.CircleGeometry(0.075, 20),
+        new THREE.MeshBasicMaterial({ color: COLORS.black, transparent: true, opacity: 0.14, depthWrite: false }),
+      );
+      shadow.rotation.x = -Math.PI / 2;
+      shadow.position.set(point.x, 0.006, point.z);
       this.world.addBody(body);
-      this.scene.add(mesh);
-      this.pinPairs.push({ body, mesh, number: index + 1 });
+      this.scene.add(mesh, shadow);
+      this.pinPairs.push({ body, mesh, shadow, number: index + 1 });
     }
   }
 
   createPinBody(x, z) {
     const body = new CANNON.Body({
-      mass: 1.58,
+      mass: 1.46,
       material: this.pinMaterial,
       linearDamping: 0.2,
       angularDamping: 0.36,
@@ -259,28 +292,36 @@ export class BowlingScene {
       [0.025, 0.202], [0, 0.212],
     ].map(([radius, y]) => new THREE.Vector2(radius, y));
     const group = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.LatheGeometry(profile, 24),
-      new THREE.MeshPhysicalMaterial({ color: 0xf4f3ee, roughness: 0.24, clearcoat: 0.82 }),
+    const geometry = new THREE.LatheGeometry(profile, 24);
+    const outline = new THREE.Mesh(
+      geometry,
+      new THREE.MeshBasicMaterial({ color: COLORS.black, side: THREE.BackSide }),
     );
-    group.add(body);
+    outline.scale.setScalar(1.065);
+    const body = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    group.add(outline, body);
     for (const y of [0.105, 0.125]) {
-      const stripe = new THREE.Mesh(
-        new THREE.TorusGeometry(0.039, 0.007, 6, 24),
-        new THREE.MeshStandardMaterial({ color: COLORS.red, roughness: 0.38 }),
+      const stripeOutline = new THREE.Mesh(
+        new THREE.TorusGeometry(0.039, 0.011, 6, 24),
+        new THREE.MeshBasicMaterial({ color: COLORS.black }),
       );
-      stripe.rotation.x = Math.PI / 2;
-      stripe.position.y = y;
-      group.add(stripe);
+      const stripe = new THREE.Mesh(
+        new THREE.TorusGeometry(0.039, 0.006, 6, 24),
+        new THREE.MeshBasicMaterial({ color: COLORS.red }),
+      );
+      stripeOutline.rotation.x = stripe.rotation.x = Math.PI / 2;
+      stripeOutline.position.y = stripe.position.y = y;
+      group.add(stripeOutline, stripe);
     }
     group.userData.pinNumber = number;
     return group;
   }
 
   clearPins() {
-    for (const { body, mesh } of this.pinPairs) {
+    for (const { body, mesh, shadow } of this.pinPairs) {
       this.world.removeBody(body);
       this.scene.remove(mesh);
+      this.scene.remove(shadow);
       mesh.traverse((child) => {
         if (child.geometry) child.geometry.dispose();
       });
@@ -302,18 +343,20 @@ export class BowlingScene {
     const aspect = width / height;
     this.camera.aspect = aspect;
     if (aspect < 0.82) {
-      this.camera.fov = 48;
-      this.camera.position.set(0, 4.5, 8.2);
-      this.camera.lookAt(0, -0.15, -10.3);
+      this.camera.fov = 43;
+      this.baseCameraPosition.set(0, 1.62, 5.35);
+      this.baseCameraTarget.set(0, 0.08, -11.6);
     } else if (this.mode === "menu") {
-      this.camera.fov = 46;
-      this.camera.position.set(2.4, 3.1, 6.2);
-      this.camera.lookAt(0, -0.05, -10.2);
+      this.camera.fov = 44;
+      this.baseCameraPosition.set(0.7, 1.52, 4.85);
+      this.baseCameraTarget.set(0, 0.08, -11.1);
     } else {
-      this.camera.fov = 47;
-      this.camera.position.set(1.75, 3.3, 6.6);
-      this.camera.lookAt(0, -0.05, -10.5);
+      this.camera.fov = 44;
+      this.baseCameraPosition.set(0, 1.42, 4.55);
+      this.baseCameraTarget.set(0, 0.08, -11.25);
     }
+    this.camera.position.copy(this.baseCameraPosition);
+    this.camera.lookAt(this.baseCameraTarget);
     this.camera.updateProjectionMatrix();
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, aspect < 0.82 ? 1.45 : 1.8));
     this.renderer.setSize(width, height, false);
@@ -334,32 +377,38 @@ export class BowlingScene {
     return ((board - 20) / 38) * (LANE_WIDTH * 0.82);
   }
 
-  roll({ power = 0.72, spin = 0, aim = this.aimBoard } = {}) {
+  roll({ speed = 0.64, rotation = 0, angle = this.aimBoard } = {}) {
     if (this.rolling) return false;
-    this.setAim(aim);
+    this.setAim(angle);
     const startX = this.boardToX(this.startBoard);
     const targetX = this.boardToX(this.aimBoard);
-    const velocity = 9.5 + Math.max(0.15, Math.min(1, power)) * 11.5;
+    const velocity = 9.5 + Math.max(0.15, Math.min(1, speed)) * 11.5;
     const line = Math.max(-0.9, Math.min(0.9, (targetX - startX) * 0.8));
     this.ballBody.wakeUp();
     this.ballBody.velocity.set(line, 0, -velocity);
-    this.ballBody.angularVelocity.set(-velocity / BALL_RADIUS, 0, -spin * 16);
-    this.hook = Math.max(-1, Math.min(1, spin));
+    this.ballBody.angularVelocity.set(-velocity / BALL_RADIUS, 0, -rotation * 18);
+    this.hook = Math.max(-1, Math.min(1, rotation));
     this.rolling = true;
     this.rollStartedAt = performance.now();
     this.settleStartedAt = 0;
     this.rollStandingBefore = this.countStandingPins();
     this.aimLine.visible = false;
-    for (const ember of this.trail) ember.visible = true;
+    this.impactCameraTriggered = false;
+    this.cameraCutUntil = 0;
+    for (const ribbon of this.trailRibbons) ribbon.visible = !this.reducedEffects;
     return true;
   }
 
   countStandingPins() {
+    return this.standingPinNumbers().length;
+  }
+
+  standingPinNumbers() {
     const up = new CANNON.Vec3(0, 1, 0);
     return this.pinPairs.filter(({ body }) => {
       const pinUp = body.quaternion.vmult(up);
       return body.position.y > 0.13 && pinUp.y > 0.68 && body.position.z > -20.8;
-    }).length;
+    }).map(({ number }) => number);
   }
 
   prepareNextBall({ fullRack = false } = {}) {
@@ -372,6 +421,7 @@ export class BowlingScene {
         if (!standing) {
           this.world.removeBody(pair.body);
           this.scene.remove(pair.mesh);
+          this.scene.remove(pair.shadow);
           this.pinPairs.splice(this.pinPairs.indexOf(pair), 1);
         } else {
           pair.body.velocity.setZero();
@@ -384,6 +434,8 @@ export class BowlingScene {
     this.rolling = false;
     this.settleStartedAt = 0;
     this.aimLine.visible = true;
+    this.impactCameraTriggered = false;
+    this.cameraCutUntil = 0;
   }
 
   resetBall() {
@@ -394,7 +446,9 @@ export class BowlingScene {
     this.ballBody.quaternion.set(0, 0, 0, 1);
     this.ballBody.sleep();
     this.syncBody(this.ballBody, this.ballMesh);
-    for (const ember of this.trail) ember.visible = false;
+    this.ballShadow.position.set(x, 0.006, 0.78);
+    for (const point of this.trailPoints) point.set(x, 0.014, 0.78);
+    for (const ribbon of this.trailRibbons) ribbon.visible = false;
   }
 
   createAimGuide() {
@@ -430,7 +484,7 @@ export class BowlingScene {
   setReducedEffects(reduced) {
     this.reducedEffects = reduced;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, reduced ? 1 : 1.7));
-    for (const [index, ember] of this.trail.entries()) ember.visible = !reduced && this.rolling && index < 12;
+    for (const ribbon of this.trailRibbons) ribbon.visible = !reduced && this.rolling;
   }
 
   setFamilyMode(enabled) {
@@ -458,9 +512,13 @@ export class BowlingScene {
           this.ballBody.position.x = side * (LANE_WIDTH / 2 - BALL_RADIUS * 0.76);
           this.ballBody.velocity.x = -side * Math.max(0.45, Math.abs(this.ballBody.velocity.x) * 0.42);
         }
-        if (this.rolling && this.ballBody.position.z < -7.4 && this.ballBody.position.z > -17.8) {
-          const hookGain = THREE.MathUtils.clamp((-this.ballBody.position.z - 7.4) / 10.4, 0, 1);
-          this.ballBody.applyForce(new CANNON.Vec3(this.hook * hookGain * 4.8, 0, 0));
+        if (this.rolling && this.ballBody.position.z < -3 && this.ballBody.position.z > -18.4) {
+          const traction = THREE.MathUtils.clamp((-this.ballBody.position.z - 3) / 15.4, 0.12, 1);
+          const lateralRollSpeed = -this.ballBody.angularVelocity.z * BALL_RADIUS;
+          const slip = lateralRollSpeed - this.ballBody.velocity.x;
+          const forceX = slip * this.ballBody.mass * LANE_FRICTION * 54 * traction;
+          this.ballBody.applyForce(new CANNON.Vec3(forceX, 0, 0));
+          this.ballBody.torque.z += forceX * BALL_RADIUS;
         }
         this.world.step(FIXED_STEP);
         this.accumulator -= FIXED_STEP;
@@ -471,6 +529,8 @@ export class BowlingScene {
     this.syncBody(this.ballBody, this.ballMesh);
     for (const { body, mesh } of this.pinPairs) this.syncBody(body, mesh);
     this.updateTrail();
+    this.updateContactShadows();
+    this.updateCamera(time);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -478,11 +538,66 @@ export class BowlingScene {
     if (!this.rolling || this.reducedEffects) return;
     this.clockFrame += 1;
     if (this.clockFrame % 2 !== 0) return;
-    for (let index = this.trail.length - 1; index > 0; index -= 1) {
-      this.trail[index].position.copy(this.trail[index - 1].position);
+    for (let index = this.trailPoints.length - 1; index > 0; index -= 1) {
+      this.trailPoints[index].copy(this.trailPoints[index - 1]);
     }
-    this.trail[0].position.copy(this.ballMesh.position);
-    this.trail[0].position.y = 0.06;
+    this.trailPoints[0].copy(this.ballMesh.position);
+    this.trailPoints[0].y = 0.014;
+    for (const ribbon of this.trailRibbons) {
+      const positions = ribbon.geometry.attributes.position.array;
+      const halfWidth = ribbon.userData.width / 2;
+      for (let index = 0; index < this.trailPoints.length; index += 1) {
+        const previous = this.trailPoints[Math.max(0, index - 1)];
+        const next = this.trailPoints[Math.min(this.trailPoints.length - 1, index + 1)];
+        const dx = next.x - previous.x;
+        const dz = next.z - previous.z;
+        const length = Math.hypot(dx, dz) || 1;
+        const offsetX = (-dz / length) * halfWidth;
+        const offsetZ = (dx / length) * halfWidth;
+        positions[index * 6] = this.trailPoints[index].x + offsetX;
+        positions[index * 6 + 1] = ribbon.userData.y;
+        positions[index * 6 + 2] = this.trailPoints[index].z + offsetZ;
+        positions[index * 6 + 3] = this.trailPoints[index].x - offsetX;
+        positions[index * 6 + 4] = ribbon.userData.y;
+        positions[index * 6 + 5] = this.trailPoints[index].z - offsetZ;
+      }
+      ribbon.geometry.attributes.position.needsUpdate = true;
+    }
+  }
+
+  updateContactShadows() {
+    this.ballShadow.position.x = this.ballBody.position.x;
+    this.ballShadow.position.z = this.ballBody.position.z;
+    this.ballShadow.material.opacity = THREE.MathUtils.clamp(0.2 - this.ballBody.position.y * 0.18, 0.03, 0.16);
+    for (const { body, shadow } of this.pinPairs) {
+      shadow.position.x = body.position.x;
+      shadow.position.z = body.position.z;
+      shadow.material.opacity = THREE.MathUtils.clamp(0.18 - body.position.y * 0.2, 0.025, 0.14);
+    }
+  }
+
+  updateCamera(time) {
+    const desiredPosition = this.baseCameraPosition.clone();
+    const desiredTarget = this.baseCameraTarget.clone();
+    if (this.rolling && !this.impactCameraTriggered) {
+      const push = THREE.MathUtils.clamp((-this.ballBody.position.z - 12) / 5.2, 0, 1);
+      desiredPosition.z -= push * 1.15;
+      desiredPosition.y -= push * 0.1;
+      if (this.ballBody.position.z < -17.25) {
+        this.impactCameraTriggered = true;
+        this.cameraCutUntil = time + 850;
+        this.onPinImpact?.();
+      }
+    }
+    if (this.cameraCutUntil > time) {
+      const portrait = this.camera.aspect < 0.82;
+      desiredPosition.set(portrait ? 1.1 : 2.05, portrait ? 0.95 : 1.08, -16.2);
+      desiredTarget.set(0, 0.16, HEAD_PIN_Z - 0.35);
+      this.camera.position.copy(desiredPosition);
+    } else {
+      this.camera.position.lerp(desiredPosition, 0.12);
+    }
+    this.camera.lookAt(desiredTarget);
   }
 
   checkRoll(time) {
@@ -494,7 +609,7 @@ export class BowlingScene {
       const standing = this.countStandingPins();
       const knocked = Math.max(0, this.rollStandingBefore - standing);
       this.rolling = false;
-      this.onRollComplete?.({ knocked, standing, speed: this.ballBody.velocity.length() });
+      this.onRollComplete?.({ knocked, standing, standingPins: this.standingPinNumbers(), speed: this.ballBody.velocity.length() });
     }
   }
 

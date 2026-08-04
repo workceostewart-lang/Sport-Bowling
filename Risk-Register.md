@@ -24,6 +24,7 @@ Ordered by expected cost, not probability. A low-probability risk that forces a 
 | **R8** | Room codes get scraped and joined by strangers | Low | Medium | Reports of uninvited joiners | Private rooms by default, host approval toggle, code rotation on kick |
 | **R9** | Scoring disputes — a player believes the score is wrong | Low | Low | Support volume | Reference engine + published test suite. Score is provable, not arguable |
 | **R10** | Handicap is perceived as unfair by the stronger player | Medium | Low | Playtest feedback | Off by default, raw score always displayed, leaderboards scratch-only |
+| **R11** | Family Mode release-to-screen latency exceeds 80 ms on typical home Wi-Fi | Medium | **Critical** — motion control stops feeling connected | Real-device domestic Wi-Fi gate before every multiplayer milestone | Keep swing input on a direct local peer channel; use the server only for signaling. If the gate still fails, investigate BLE/native LAN transport before expanding room size |
 
 ---
 
