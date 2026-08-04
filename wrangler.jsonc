@@ -4,6 +4,8 @@
   "main": "worker.js",
   "compatibility_date": "2026-08-03",
   "routes": [
+    { "pattern": "bowling.fantomzone.app/*", "zone_name": "fantomzone.app" },
+    { "pattern": "bowling.fantomzone.app", "custom_domain": true },
     { "pattern": "sport-bowling.fantomzone.app/*", "zone_name": "fantomzone.app" },
     { "pattern": "sport-bowling.fantomzone.app", "custom_domain": true }
   ],
